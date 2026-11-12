@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+<rect width="512" height="512" rx="108" fill="#376e9c"/>
+<rect x="92" y="90" width="328" height="336" rx="42" fill="#ffffff" opacity=".12"/>
+<path d="M150 176h210M150 258h134M150 340h210" stroke="#cbe0ef" stroke-width="22" stroke-linecap="round" opacity=".6"/>
+<text x="257" y="330" text-anchor="middle" font-family="PingFang SC,Microsoft YaHei,sans-serif" font-size="220" font-weight="bold" fill="#fff">听</text>
+</svg>

@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "听写小助手 · Dictation Buddy",
+  "short_name": "听写小助手",
+  "description": "中文和英文手动输入与拍照识词、词库组合、顺序随机听写、拼音提示",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#f7f8fa",
+  "icons": [
+    {"src":"./assets/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+    {"src":"./assets/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+  ]
+}
