@@ -1,5 +1,5 @@
-const CACHE = 'dictation-buddy-v0.1.1';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './core.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png'];
+const CACHE = 'dictation-buddy-v0.3.1';
+const SHELL = ['./', './index.html', './styles.css', './app.js', './core.js', './ocr-utils.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));
 });

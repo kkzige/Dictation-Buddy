@@ -13,3 +13,29 @@ main{padding:23px 20px 30px}.page-header{display:flex;align-items:flex-start;jus
 @media(max-width:390px){.import-method{padding:8px;gap:6px;font-size:12px}.import-method small{font-size:9px}.method-symbol{width:25px}}
 
 .visually-hidden-file{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden;clip-path:inset(50%);pointer-events:none}
+
+/* v0.3 visible dictation controls and finger-driven image cropping */
+.focus-heading{font-size:17px!important;margin-bottom:8px!important}
+.setting-focus{border:1px solid #e4eaf2;border-radius:15px;padding:13px;margin:13px 0;background:#fbfdff}
+.setting-focus-name{display:flex;flex-direction:column;gap:6px;margin-bottom:12px;line-height:1.45}
+.setting-focus-name strong{font-size:14px;color:#29435e}
+.setting-focus-name small{font-size:12px;color:#6a7c90}
+.settings-count{grid-template-columns:repeat(5,minmax(0,1fr));gap:6px}
+.setting-count-option{padding:9px 2px;justify-content:center;gap:3px;flex-direction:column;min-height:50px;white-space:nowrap}
+.setting-count-option input{width:17px;height:17px}
+.writing-presets{grid-template-columns:repeat(4,1fr);gap:7px;margin-top:10px}
+.writing-presets .btn{padding:8px 2px;min-height:43px}
+.crop-help{font-size:12px;color:#476d91;margin:6px 0 10px}
+.crop-stage{display:inline-block;position:relative;line-height:0;max-width:100%;touch-action:none;user-select:none;-webkit-user-select:none;border-radius:9px;overflow:visible;background:#e3e7ed;}
+.crop-stage img{display:block;max-width:100%;max-height:350px;width:auto;height:auto;object-fit:contain;pointer-events:none;border-radius:9px}
+.crop-box{position:absolute;z-index:1;box-shadow:0 0 0 2000px #142c4559;border:2px solid #eaf5ff;outline:2px solid #327cc0;outline-offset:0;cursor:move;line-height:normal}
+.crop-handle{position:absolute;display:block;width:23px;height:23px;background:#fff;border:3px solid #347fbf;border-radius:50%;box-shadow:0 2px 6px #223e5855;touch-action:none}
+.crop-handle.tl{left:-12px;top:-12px;cursor:nwse-resize}.crop-handle.tr{right:-12px;top:-12px;cursor:nesw-resize}.crop-handle.bl{left:-12px;bottom:-12px;cursor:nesw-resize}.crop-handle.br{right:-12px;bottom:-12px;cursor:nwse-resize}
+.crop-info{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:11px 0 4px;font-size:12px;color:#58728c}
+@media(max-width:375px){.setting-count-option strong{font-size:12px}}
+
+/* v0.3.1 explicit add-to-existing-bank entry points */
+.bank-add-actions{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px;margin-top:14px}
+.bank-add-btn{white-space:normal;min-height:45px;padding:8px 7px;font-size:13px;line-height:1.3;background:#eef5fd;color:#305f8c;border-color:#d3e3f2;box-shadow:none}
+.bank-add-btn:active{background:#ddeafa}
+@media(max-width:365px){.bank-add-btn{font-size:12px;padding:7px 4px}}

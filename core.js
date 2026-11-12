@@ -3,13 +3,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
   order: 'sequential',
   repetitions: 2,
   repeatGap: 1.0,
-  wordGap: 4.0,
+  wordGap: 5.0,
   rateZh: 0.86,
   rateEn: 0.84,
   skipDuplicates: true,
   hideAnswers: true,
   zhVoice: '',
   enVoice: '',
+  ocrEndpoint: '',
 });
 
 export const uid = () => (globalThis.crypto?.randomUUID?.() ?? `id-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -20,9 +21,11 @@ export const isChineseCharacter = c => /\p{Script=Han}/u.test(c);
 
 export function parseEntries(raw, lang = 'zh-CN', mode = 'line') {
   const input = String(raw ?? '').replace(/\r\n?/g, '\n');
-  const segments = mode === 'punct'
+  // 'auto' defaults to Chinese whitespace segmentation, but preserves English phrases.
+  const effectiveMode = mode === 'auto' ? (lang === 'zh-CN' ? 'spaces' : 'punct') : mode;
+  const segments = effectiveMode === 'punct'
     ? input.split(/[\n,，、;；\t|]+/)
-    : mode === 'spaces'
+    : effectiveMode === 'spaces'
       ? input.split(/[\s,，、;；|]+/)
       : input.split('\n');
   const out = [];
@@ -40,6 +43,29 @@ export function parseEntries(raw, lang = 'zh-CN', mode = 'line') {
   return out;
 }
 
+
+/** Case- and width-insensitive dedupe; retains original display text. */
+export const normalizeTermKey = text => String(text ?? '').trim().normalize('NFKC').toLocaleLowerCase('en');
+
+/** Prepare additions without mutating an existing word bank or breaking saved group references. */
+export function prepareBankEntries(entries, lang='zh-CN', existingItems=[]) {
+  const seen=new Set(existingItems.map(item=>normalizeTermKey(item.text)));
+  const items=[];let skipped=0;
+  for(const entry of entries||[]){
+    const text=String(entry?.text??'').trim().slice(0,200);
+    if(!text)continue;
+    const key=normalizeTermKey(text);
+    if(seen.has(key)){skipped++;continue;}
+    seen.add(key);
+    const chars=graphemes(text);
+    const marks=lang==='zh-CN'
+      ? [...new Set((Array.isArray(entry?.marks)?entry.marks:[]).filter(i=>Number.isInteger(i)&&i>=0&&i<chars.length&&isChineseCharacter(chars[i])))].sort((a,b)=>a-b)
+      : [];
+    items.push({id:entry?.id||uid(),text,marks});
+  }
+  return {items,skipped};
+}
+
 export function normalizeDb(raw) {
   const db = {banks: [], groups: [], settings: {...DEFAULT_SETTINGS}};
   if (!raw || typeof raw !== 'object') return db;
@@ -51,13 +77,14 @@ export function normalizeDb(raw) {
       order: allowedOrder.includes(s.order) ? s.order : DEFAULT_SETTINGS.order,
       repetitions: Math.round(clamp(s.repetitions ?? 2, 1, 5)),
       repeatGap: clamp(s.repeatGap ?? 1, 0, 5),
-      wordGap: clamp(s.wordGap ?? 4, 1, 20),
+      wordGap: clamp(s.wordGap ?? 5, 1, 30),
       rateZh: clamp(s.rateZh ?? .86, .55, 1.4),
       rateEn: clamp(s.rateEn ?? .84, .55, 1.4),
       skipDuplicates: s.skipDuplicates !== false,
       hideAnswers: s.hideAnswers !== false,
       zhVoice: String(s.zhVoice ?? '').slice(0, 200),
       enVoice: String(s.enVoice ?? '').slice(0, 200),
+      ocrEndpoint: String(s.ocrEndpoint ?? '').slice(0, 512),
     };
   }
   const validBanks = (Array.isArray(raw.banks) ? raw.banks : []).slice(0, 400);
@@ -185,7 +212,7 @@ export function buildSteps(words, settings) {
       steps.push({type: 'wait', duration: 550, wordIndex: index});
       steps.push({type: 'say', phase: 'pinyin', text: prompt, lang: 'zh-CN', wordIndex: index, rep: reps, reps});
     }
-    if (index < words.length - 1) steps.push({type: 'wait', duration: Math.round(clamp(settings.wordGap, 1, 20) * 1000), wordIndex: index});
+    if (index < words.length - 1) steps.push({type: 'wait', duration: Math.round(clamp(settings.wordGap, 1, 30) * 1000), wordIndex: index});
   }
   return steps;
 }

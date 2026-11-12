@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {
   parseEntries, normalizeDb, deduplicateWords, arrangeWords, buildSteps,
-  pinPrompt, collectWords, graphemes
+  pinPrompt, collectWords, graphemes, prepareBankEntries
 } from '../core.js';
 
 test('中文逐行导入、去编号、去重但不错误拆词', () => {
@@ -43,4 +43,29 @@ test('随机模式为真正重排', () => {
 });
 test('标记按 Unicode 字符计算', () => {
   assert.equal(graphemes('𠮷祥').length,2);
+});
+
+test('向已有词库批量添加：跳过重复并保留原 ID 和拼音标记', () => {
+  const original=[{id:'old-1',text:'苹果',marks:[0]}];
+  const additions=[
+    {id:'new-1',text:' 苹果 ',marks:[1]},
+    {id:'new-2',text:'香蕉',marks:[0,1]},
+    {id:'new-3',text:'香蕉',marks:[1]},
+    {id:'new-4',text:'葡萄',marks:[0]},
+  ];
+  const {items,skipped}=prepareBankEntries(additions,'zh-CN',original);
+  assert.equal(skipped,2);
+  assert.deepEqual(items.map(w=>w.text),['香蕉','葡萄']);
+  assert.deepEqual(items[0].marks,[0,1]);
+  assert.deepEqual(original,[{id:'old-1',text:'苹果',marks:[0]}]);
+});
+
+test('中文宽度兼容去重、英语大小写去重，英语自动保留词组', () => {
+  const existing=[{id:'1',text:'ABC',marks:[]}];
+  const {items,skipped}=prepareBankEntries([{id:'2',text:'ａｂｃ',marks:[0]},{id:'3',text:'look after',marks:[1]}],'en-US',existing);
+  assert.equal(skipped,1);
+  assert.deepEqual(items.map(i=>i.text),['look after']);
+  assert.deepEqual(items[0].marks,[]);
+  assert.deepEqual(parseEntries('苹果 香蕉 葡萄','zh-CN','auto').map(x=>x.text),['苹果','香蕉','葡萄']);
+  assert.deepEqual(parseEntries('look after\nget up','en-US','auto').map(x=>x.text),['look after','get up']);
 });

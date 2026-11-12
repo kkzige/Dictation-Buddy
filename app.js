@@ -1,8 +1,9 @@
 import {
   DEFAULT_SETTINGS, uid, parseEntries, normalizeDb, refKey, collectWords,
   getItemsFromRefs, arrangeWords, buildSteps, languageName, graphemes,
-  isChineseCharacter, indicesToPrompt, clamp
+  isChineseCharacter, indicesToPrompt, clamp, prepareBankEntries, normalizeTermKey
 } from './core.js';
+import {validateOcrEndpoint, extractOcrLines, clampCrop} from './ocr-utils.js';
 
 const STORAGE_KEY = 'dictation-buddy-v0.1-data';
 const OCR_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; // OCR only, fetched on demand
@@ -25,8 +26,14 @@ let editorContext = null;
 let importFile = null;
 let importMode = 'manual';
 let importDraft = null;
+let importTargetBankId = null; // null means create a new bank; otherwise append to this bank
 let importReviewExpanded = new Set();
 let importFileUrl = '';
+let crop = {x:.06,y:.06,w:.88,h:.88};
+let cropPointer = null;
+let ocrKind = 'handwriting'; // deliberate choice: never silently use print OCR for handwriting
+let ocrPin = ''; // never persisted or exported
+
 let ocrBusy = false;
 let ocrLoading = null;
 let toastTimer = 0;
@@ -57,8 +64,11 @@ function closeModal() {
   document.body.style.overflow = '';
   importFile = null;
   importDraft = null;
+  importTargetBankId = null;
   importReviewExpanded.clear();
   if (importFileUrl) { URL.revokeObjectURL(importFileUrl); importFileUrl = ''; }
+  cropPointer=null;
+
   editorContext = null;
 }
 function setTab(next) {
@@ -104,7 +114,7 @@ function renderSelection() {
     <button class="btn btn-small" data-action="clear-selection">清空</button>`;
 }
 function renderBanks() {
-  let html = `<div class="page-header"><div><div class="eyebrow">WORD LIBRARY</div><h1 class="page-title">我的词库</h1><p class="page-description">每次拍照或输入保存一份词库，可跨词库勾选复习。</p></div><button type="button" class="btn btn-primary" data-action="open-import">＋ 导入</button></div>
+  let html = `<div class="page-header"><div><div class="eyebrow">WORD LIBRARY</div><h1 class="page-title">我的词库</h1><p class="page-description">既能新建词库，也能在已有词库中用拍照或手动输入继续添加。</p></div><button type="button" class="btn btn-primary" data-action="open-import">＋ 导入</button></div>
     <div class="stats"><div class="stat"><strong>${db.banks.length}</strong><span>份词库</span></div><div class="stat"><strong>${totalWords()}</strong><span>个词语</span></div><div class="stat"><strong>${db.groups.length}</strong><span>个组合</span></div></div>`;
   if (!db.banks.length) return html+`<div class="empty"><div class="empty-symbol">▦</div><h3>从第一份词库开始</h3><p>拍课本、练习册或默写清单，也可以直接粘贴词语。</p><div class="action-row" style="justify-content:center"><button class="btn btn-primary" data-action="open-import">创建词库</button><button class="btn" data-action="add-demo">体验示例</button></div></div>`;
   html += `<div class="section-title">词库列表 · ${db.banks.length} 份</div>`;
@@ -112,10 +122,11 @@ function renderBanks() {
     const isOpen=expanded.has(bank.id);
     const selectedCount=bank.items.filter(item=>selected.has(refKey(bank.id,item.id))).length;
     html += `<article class="card"><div class="card-head"><div style="min-width:0;flex:1"><h2 class="card-title">${esc(bank.title)}</h2><div class="subtext"><span class="badge">${languageName(bank.lang)}</span>${bank.items.length} 个词语${selectedCount?` · 已选 ${selectedCount}`:''}</div></div><button class="btn btn-small btn-subtle" data-action="toggle-bank" data-bank="${esc(bank.id)}">${isOpen?'收起':'展开'}</button></div>
-    <div class="bank-actions"><button class="btn btn-small" data-action="select-bank" data-bank="${esc(bank.id)}">${selectedCount===bank.items.length&&bank.items.length?'取消全选':'全选词语'}</button><button class="btn btn-small btn-ghost" data-action="add-word" data-bank="${esc(bank.id)}">＋ 添加</button><button class="btn btn-small btn-ghost" data-action="rename-bank" data-bank="${esc(bank.id)}">重命名</button><span class="spacer"></span><button class="text-button danger" data-action="delete-bank" data-bank="${esc(bank.id)}">删除</button></div>`;
+    <div class="bank-add-actions" aria-label="向${esc(bank.title)}添加词语"><button class="btn bank-add-btn" data-action="add-words-manual" data-bank="${esc(bank.id)}">⌨ 手动输入添加</button><button class="btn bank-add-btn" data-action="add-words-photo" data-bank="${esc(bank.id)}">▧ 拍照识别添加</button></div>
+    <div class="bank-actions"><button class="btn btn-small" data-action="select-bank" data-bank="${esc(bank.id)}">${selectedCount===bank.items.length&&bank.items.length?'取消全选':'全选词语'}</button><button class="btn btn-small btn-ghost" data-action="rename-bank" data-bank="${esc(bank.id)}">重命名</button><span class="spacer"></span><button class="text-button danger" data-action="delete-bank" data-bank="${esc(bank.id)}">删除</button></div>`;
     if (isOpen) {
       html+=`<div class="bank-body">`;
-      if(!bank.items.length) html+=`<div class="hint">没有词语，点击上方“添加”。</div>`;
+      if(!bank.items.length) html+=`<div class="hint">没有词语，点击上方“手动输入添加”或“拍照识别添加”。</div>`;
       for (const item of bank.items) {
         const key=refKey(bank.id,item.id);
         html+=`<div class="entry"><input class="checkbox item-checkbox" type="checkbox" aria-label="选择 ${esc(item.text)}" data-bank="${esc(bank.id)}" data-item="${esc(item.id)}" ${selected.has(key)?'checked':''}><div class="entry-word">${esc(item.text)}${item.marks.length?`<div class="entry-detail">${esc(indicesToPrompt(item.marks))}</div>`:''}</div><div class="entry-tools"><button class="text-button" data-action="edit-word" data-bank="${esc(bank.id)}" data-item="${esc(item.id)}">编辑</button><button class="text-button danger" data-action="delete-word" data-bank="${esc(bank.id)}" data-item="${esc(item.id)}">移除</button></div></div>`;
@@ -146,13 +157,17 @@ function sourceOptions(current) {
   return options.map(opt=>`<option value="${esc(opt.value)}" ${opt.value===curr?'selected':''}>${esc(opt.label)}</option>`).join('');
 }
 function orderRadio() {return `<div class="option-grid"><label class="choice"><input name="order" type="radio" value="sequential" ${db.settings.order==='sequential'?'checked':''}>按原顺序</label><label class="choice"><input name="order" type="radio" value="random" ${db.settings.order==='random'?'checked':''}>随机打乱</label></div>`;}
-function repsChoice() {return `<div class="option-grid" style="grid-template-columns:repeat(5,1fr);gap:6px">${[1,2,3,4,5].map(i=>`<label class="choice" style="justify-content:center;padding:9px 3px"><input type="radio" name="repetitions" value="${i}" ${db.settings.repetitions===i?'checked':''} style="display:none"><strong>${i}遍</strong></label>`).join('')}</div>`;}
+function repsChoice() {return `<div class="option-grid settings-count">${[1,2,3,4,5].map(i=>`<label class="choice setting-count-option"><input type="radio" name="repetitions" value="${i}" ${db.settings.repetitions===i?'checked':''}><strong>${i} 遍</strong></label>`).join('')}</div>`;}
 function settingsMini() {
-  return `<section class="setting-panel"><h3>播报规则</h3>
-  <label class="field"><span>播放顺序</span>${orderRadio()}</label>
-  <label class="field"><span>每个词重复次数</span>${repsChoice()}</label>
-  <label class="field"><span>词与词之间等待</span><div class="range-title"><span>给孩子留出书写时间</span><strong id="wordGapValue">${db.settings.wordGap} 秒</strong></div><input type="range" name="wordGap" min="1" max="20" step="1" value="${db.settings.wordGap}"></label>
-  <label class="field"><span>同一词重复之间等待</span><div class="range-title"><span>每遍间隔</span><strong id="repeatGapValue">${db.settings.repeatGap} 秒</strong></div><input type="range" name="repeatGap" min="0" max="5" step=".5" value="${db.settings.repeatGap}"></label>
+  return `<section class="setting-panel"><h3 class="focus-heading">听写播报设置</h3><p class="subtext">开始后会自动播完本次范围内的所有词语，无需逐词点击。</p>
+  <div class="setting-focus"><div class="setting-focus-name"><strong>① 每个词语重复几遍</strong><small>例如“苹果”读 2 遍</small></div>${repsChoice()}</div>
+  <div class="setting-focus"><div class="setting-focus-name"><strong>② 同一个词语的重复间隔</strong><small>两遍“苹果”之间停顿多久</small></div>
+    <div class="range-title"><span>重复间隔</span><strong id="repeatGapValue">${db.settings.repeatGap} 秒</strong></div><input aria-label="同一个词语的重复间隔" type="range" name="repeatGap" min="0" max="5" step=".5" value="${db.settings.repeatGap}"></div>
+  <div class="setting-focus"><div class="setting-focus-name"><strong>③ 不同词语之间的书写时间</strong><small>上一个词全部读完（包含拼音提示）后，等多久再读下一个词</small></div>
+    <div class="range-title"><span>书写时间</span><strong id="wordGapValue">${db.settings.wordGap} 秒</strong></div>
+    <input aria-label="不同词语之间的书写时间" type="range" name="wordGap" min="1" max="30" step="1" value="${db.settings.wordGap}">
+    <div class="option-grid writing-presets">${[3,5,8,10].map(n=>`<button type="button" class="btn ${db.settings.wordGap===n?'btn-subtle':'btn-secondary'}" data-action="set-word-gap" data-seconds="${n}" aria-pressed="${db.settings.wordGap===n}">${n} 秒</button>`).join('')}</div></div>
+  <div class="setting-focus"><div class="setting-focus-name"><strong>④ 播放顺序</strong></div>${orderRadio()}</div>
   <div class="action-row"><label class="choice" style="flex:1"><input type="checkbox" name="skipDuplicates" ${db.settings.skipDuplicates?'checked':''}>合并重复词语</label><label class="choice" style="flex:1"><input type="checkbox" name="hideAnswers" ${db.settings.hideAnswers?'checked':''}>默认隐藏答案</label></div>
   </section>`;
 }
@@ -203,30 +218,47 @@ function renderSettings() {
   <section class="setting-panel"><h3>词库数据</h3><p class="subtext">当前 ${db.banks.length} 份词库，${totalWords()} 个词语，${db.groups.length} 个组合。数据只存当前浏览器，不会自动同步到其他设备。</p>
   <div class="action-row"><button class="btn btn-primary" data-action="export-backup">导出 JSON 备份</button><label class="btn" for="backupFile">导入 JSON 备份</label><input type="file" id="backupFile" accept="application/json,.json" class="visually-hidden-file"></div>
   <div class="small-note warning-note">Safari 清理网站数据、删除主屏幕应用，或更换设备时，词库可能丢失。建议每周导出备份。导入备份会替换当前所有词库与组合。</div></section>
-  <section class="setting-panel"><h3>离线与识别说明</h3><p class="subtext">词库编辑、组合及基础播报依靠本机浏览器能力；拍照 OCR 首次加载需要联网下载识别程序和语言包，不能保证在无网络环境可用。照片不会由本应用上传到我们的服务器；使用第三方 CDN 下载 OCR 程序。</p><p class="subtext">iOS 锁屏、切出应用或语音引擎被系统中断，可能停止播报；建议亮屏使用。</p></section>
+  <section class="setting-panel"><h3>手写识别服务（需配置一次）</h3><p class="subtext">手写体改用百度智能云的专用手写 OCR。GitHub Pages 不能安全保管密钥，因此需要单独部署提供的 Cloudflare Worker。</p>
+  <label class="field"><span>Worker 识别接口地址</span><input name="ocrEndpoint" type="url" placeholder="https://你的服务.workers.dev/ocr" value="${esc(db.settings.ocrEndpoint)}" autocomplete="off"><small class="hint">仅保存公开接口地址，不保存服务商密钥。</small></label>
+  <label class="field"><span>访问口令（本次打开应用有效）</span><input id="ocrPin" type="password" placeholder="Worker 中设置的 OCR_ACCESS_PIN" autocomplete="off" value="${esc(ocrPin)}"><small class="hint">口令只放在内存中，不写入词库备份或本地存储。退出或刷新后可能需重新输入。</small></label>
+  <p class="subtext">使用云识别时，只有裁剪后的选区图片会发送给 Worker 和百度 OCR；印刷体本机识别不会上传照片。涉及未成年人信息时请避免拍入姓名、学校等个人内容。</p></section>
+  <section class="setting-panel"><h3>离线与播报说明</h3><p class="subtext">手动录入、词库与基础播报不依赖自建后端；云端手写 OCR 需要网络与有效的服务配置。印刷体本机识别首次使用需要联网加载语言模型。</p><p class="subtext">iOS 锁屏、切出应用或语音引擎被系统中断，可能停止播报；建议亮屏使用。</p></section>
   <section class="setting-panel"><h3>快速试用</h3><div class="action-row"><button class="btn" data-action="add-demo">新增示例词库</button><button class="btn btn-danger" data-action="clear-everything">清空全部数据</button></div></section>`;
 }
 
-function openImport(restore = false) {
-  if(!restore) { importDraft = null; importMode = 'manual'; }
+function openImport(restore = false, targetBankId = null, preferredMode = 'manual') {
+  if(!restore) {
+    importTargetBankId = targetBankId;
+    importDraft = null;
+    importMode = preferredMode === 'photo' ? 'photo' : 'manual';
+    ocrKind = 'handwriting';
+  }
+  const targetBank = importTargetBankId ? getBank(importTargetBankId) : null;
+  if(importTargetBankId && !targetBank) {toast('目标词库不存在，请返回词库列表重新选择。');return;}
   const old = restore ? importDraft : null;
-  modal('创建词库 · 添加词语', `
-  <label class="field"><span>词库名称</span><input id="importName" placeholder="例如：五年级第12课 / PET Unit 3" value="${esc(old?.name || '听写 · '+new Date().toLocaleDateString('zh-CN'))}" maxlength="80"></label>
-  <label class="field"><span>词语语言</span><select id="importLang"><option value="zh-CN" ${old?.lang==='zh-CN'?'selected':''}>中文</option><option value="en-US" ${old?.lang==='en-US'?'selected':''}>英文</option></select></label>
+  const title = targetBank ? '向已有词库添加词语' : '创建词库 · 添加词语';
+  modal(title, `
+  ${targetBank ? `<div class="review-summary"><strong>添加至：${esc(targetBank.title)}</strong><span class="badge">${languageName(targetBank.lang)}</span><div class="hint">已有 ${targetBank.items.length} 个词语，新词会追加到这里，不覆盖已有内容，重复项自动跳过。</div></div><input type="hidden" id="importLang" value="${targetBank.lang}">` : `<label class="field"><span>词库名称</span><input id="importName" placeholder="例如：五年级第12课 / PET Unit 3" value="${esc(old?.name || '听写 · '+new Date().toLocaleDateString('zh-CN'))}" maxlength="80"></label>
+  <label class="field"><span>词语语言</span><select id="importLang"><option value="zh-CN" ${(old?.lang||'zh-CN')==='zh-CN'?'selected':''}>中文</option><option value="en-US" ${old?.lang==='en-US'?'selected':''}>英文</option></select></label>`}
   <div class="field"><span>选择添加方式</span><div class="import-methods" role="group" aria-label="添加方式">
     <button type="button" class="import-method ${importMode==='manual'?'active':''}" data-action="import-mode" data-method="manual" aria-pressed="${importMode==='manual'}"><span class="method-symbol">⌨</span><span>手动输入<small>单词、词组或批量粘贴</small></span></button>
     <button type="button" class="import-method ${importMode==='photo'?'active':''}" data-action="import-mode" data-method="photo" aria-pressed="${importMode==='photo'}"><span class="method-symbol">▧</span><span>拍照识别<small>拍课本、相册选图</small></span></button>
   </div></div>
-  <section id="manualImportPanel" ${importMode==='manual'?'':'hidden'}><div class="small-note">手动输入时，一行一个词最稳妥。可以一次输入一项，也可以从微信、备忘录直接粘贴整份清单。</div></section>
-  <section id="photoImportPanel" ${importMode==='photo'?'':'hidden'}><div class="field"><span>拍照或从相册选择图片</span><div class="action-row"><label class="btn btn-subtle" for="cameraFile">📷 拍照</label><input type="file" id="cameraFile" accept="image/*" capture="environment" class="visually-hidden-file"><label class="btn" for="galleryFile">▧ 相册选取</label><input type="file" id="galleryFile" accept="image/*" class="visually-hidden-file"></div><div id="photoHolder"></div><button class="btn btn-subtle" id="recognizeButton" data-action="run-ocr" disabled style="margin-top:10px">识别图片中的文字</button><div id="ocrStatus" class="ocr-status">首次识别需联网下载 OCR 模型；识别后可以人工修改。</div><small class="hint">清晰、单栏、竖直的词语表效果更好；也可以用 iPhone“实况文本”复制照片文字后粘贴。</small></div></section>
+  <section id="manualImportPanel" ${importMode==='manual'?'':'hidden'}><div class="small-note">中文默认按空格、换行和标点自动切分；英文默认保留词组内空格（例如 look after）。</div></section>
+  <section id="photoImportPanel" ${importMode==='photo'?'':'hidden'}>
+    <div class="field"><span>拍照或从相册选择图片</span><div class="action-row"><label class="btn btn-subtle" for="cameraFile">📷 拍照</label><input type="file" id="cameraFile" accept="image/*" capture="environment" class="visually-hidden-file"><label class="btn" for="galleryFile">▧ 相册选取</label><input type="file" id="galleryFile" accept="image/*" class="visually-hidden-file"></div></div>
+    <div class="field"><span>识别类型</span><div class="option-grid"><label class="choice"><input type="radio" name="ocrKind" value="handwriting" ${ocrKind==='handwriting'?'checked':''}>✍️ 手写体（专用云识别）</label><label class="choice"><input type="radio" name="ocrKind" value="printed" ${ocrKind==='printed'?'checked':''}>▤ 印刷体（本机识别）</label></div></div>
+    <div id="photoHolder"></div>
+    <button class="btn btn-subtle btn-wide" id="recognizeButton" data-action="run-ocr" disabled style="margin-top:10px">只识别框选区域</button>
+    <div id="ocrStatus" class="ocr-status">请先选择图片，用手指拖动方框或角点。手写体识别需要先在“设置”配置云端接口。</div>
+    <small class="hint">识别结果需要人工核对；不要把姓名等隐私信息放进框选区域。</small>
+  </section>
   <label class="field"><span>${importMode==='manual'?'输入或粘贴词语':'识别结果 / 手动补充词语'}</span><textarea id="importText" rows="7" placeholder="每行一个词语，例如：\n崎岖\n拥抱\n坚韧">${esc(old?.entries.map(x=>x.text).join('\n') || '')}</textarea><small class="hint">单个词语直接输入一行即可；多项内容可批量粘贴。下一步逐条检查和标记拼音字。</small></label>
-  <label class="field"><span>拆分方式</span><select id="importSplit"><option value="line">每行一个词语（适合英文词组）</option><option value="punct">按换行、逗号、顿号、分号拆分</option><option value="spaces">按空格、换行及标点拆分（适合英文单词）</option></select></label>
+  <label class="field"><span>拆分方式</span><select id="importSplit"><option value="auto" selected>自动识别分隔（推荐：中文空格自动切分，英文保留短语）</option><option value="line">严格按行（一个整行作为词语）</option><option value="punct">按换行、逗号、顿号、分号拆分</option><option value="spaces">按空格、换行及标点拆分</option></select></label>
   <div class="small-note" id="importPreview">输入后会显示词语数量和部分预览。</div>
   <button class="btn btn-primary btn-wide" data-action="review-import">下一步 · 核对词语和拼音标记</button>`);
   if(importFile && importFileUrl){
-    const holder=$('#photoHolder');
-    holder.innerHTML=`<img class="ocr-preview" alt="待识别的照片" src="${esc(importFileUrl)}"><div class="hint">已选择：${esc(importFile.name || '拍摄照片')}</div>`;
-    $('#recognizeButton').disabled=false;
+    drawPhotoHolder();
   }
   refreshImportPreview();
 }
@@ -246,8 +278,10 @@ function refreshImportPreview() {
   if(target) target.innerHTML=entries.length?`当前 <strong>${entries.length}</strong> 个不重复词语。预览：${entries.slice(0,7).map(x=>`<span class="label-chip">${esc(x.text)}</span>`).join('')}${entries.length>7?' …':''}`:'请先选择手动输入或拍照识别，添加至少一个词语。';
 }
 function startImportReview() {
-  const name=$('#importName')?.value.trim();
-  const lang=$('#importLang')?.value;
+  const targetBank = importTargetBankId ? getBank(importTargetBankId) : null;
+  if(importTargetBankId && !targetBank){toast('目标词库已被删除。');return;}
+  const name=targetBank?.title ?? $('#importName')?.value.trim();
+  const lang=targetBank?.lang ?? $('#importLang')?.value;
   const entries=parseEntries($('#importText')?.value,lang,$('#importSplit')?.value);
   if(!name){toast('请输入词库名称。');return;}
   if(!entries.length){toast('至少输入一个词语才能继续。');return;}
@@ -259,16 +293,19 @@ function startImportReview() {
     const old=matched.get(entry.text);
     if(old){entry.marks=[...old.marks];entry.id=old.id;}
   }
-  importDraft={name,lang,entries};
+  importDraft={name,lang,entries,targetBankId:importTargetBankId};
   importReviewExpanded.clear();
   renderImportReview();
 }
 function renderImportReview() {
   const draft=importDraft;if(!draft)return;
-  modal('逐条核对 · 保存前可修改',`<div class="review-summary"><strong>${esc(draft.name)}</strong><span class="badge">${languageName(draft.lang)}</span><div class="hint">共 <strong>${draft.entries.length}</strong> 项。可以改字、删除，中文可点选需要写拼音的字。</div></div>
+  const targetBank=draft.targetBankId?getBank(draft.targetBankId):null;
+  const existingKeys=new Set((targetBank?.items||[]).map(x=>normalizeTermKey(x.text)));
+  const previouslyAdded=draft.entries.filter(x=>existingKeys.has(normalizeTermKey(x.text))).length;
+  modal('逐条核对 · 保存前可修改',`<div class="review-summary"><strong>${esc(draft.name)}</strong><span class="badge">${languageName(draft.lang)}</span><div class="hint">共 <strong>${draft.entries.length}</strong> 项。可改字、删除或标拼音。${targetBank?`已有相同词语 ${previouslyAdded} 项，保存时自动跳过；已有词语及组合不受影响。`:''}</div></div>
   <div id="importReviewList" class="review-list">${draft.entries.map((item,i)=>renderReviewItem(item,i,draft.lang)).join('')}</div>
-  <button class="btn btn-subtle btn-wide" style="margin:10px 0 13px" data-action="add-review-row">＋ 再补充一个词语</button>
-  <div class="action-row"><button class="btn" data-action="back-to-import">返回输入</button><button class="btn btn-primary" style="flex:1" data-action="save-import">确认并保存词库</button></div>`);
+  <div class="action-row" style="margin:10px 0 13px"><button class="btn btn-small btn-subtle" data-action="add-review-row">＋ 补充一个</button><button class="btn btn-small" data-action="dedupe-review">一键去重</button></div>
+  <div class="action-row"><button class="btn" data-action="back-to-import">返回输入</button><button class="btn btn-primary" style="flex:1" data-action="save-import">${targetBank?'确认添加到当前词库':'确认并保存词库'}</button></div>`);
 }
 function renderReviewItem(item, index, lang) {
   const expanded=importReviewExpanded.has(item.id);
@@ -299,21 +336,38 @@ function refreshReviewChars(id){
   if(button)button.textContent=(importReviewExpanded.has(id)?'收起标记':'标拼音')+(item.marks.length?' · '+item.marks.length+'字':'');
   $('.review-item-bottom .hint',row)?.remove();
 }
+function dedupeImportReview() {
+  if(!importDraft)return;
+  const seen=new Set();
+  const bank=importDraft.targetBankId?getBank(importDraft.targetBankId):null;
+  for(const item of bank?.items||[])seen.add(normalizeTermKey(item.text));
+  const before=importDraft.entries.length;
+  importDraft.entries=importDraft.entries.filter(item=>{
+    const key=normalizeTermKey(item.text);
+    if(!key||seen.has(key))return false;
+    seen.add(key);return true;
+  });
+  renderImportReview();
+  toast(`已清理 ${before-importDraft.entries.length} 项空白或重复词语。`);
+}
 function saveImport() {
   const draft=importDraft;if(!draft)return;
-  const entries=draft.entries.filter(x=>x.text.trim()).map(x=>({...x,text:x.text.trim()}));
-  if(!entries.length){toast('请至少保留一个词语。');return;}
-  const checked=[];const seen=new Set();
-  for(const e of entries){
-    const key=e.text.normalize('NFKC').toLocaleLowerCase('en');
-    if(seen.has(key))continue;seen.add(key);
-    const chars=graphemes(e.text);
-    checked.push({...e,marks:draft.lang==='zh-CN'?e.marks.filter(i=>isChineseCharacter(chars[i]??'')):[]});
+  const targetBank=draft.targetBankId?getBank(draft.targetBankId):null;
+  if(draft.targetBankId&&!targetBank){toast('目标词库已不存在，无法保存。');return;}
+  const {items,skipped}=prepareBankEntries(draft.entries,draft.lang,targetBank?.items||[]);
+  if(!items.length){toast(skipped?'没有需要新增的词语：全部已在词库中或重复。':'请至少保留一个词语。');return;}
+  if(targetBank){
+    targetBank.items.push(...items);
+    expanded.add(targetBank.id);
+    save();closeModal();tab='banks';render();
+    toast(`已向「${targetBank.title}」添加 ${items.length} 个词语${skipped?`，跳过 ${skipped} 个重复项`:''}。`);
+  }else{
+    const bank={id:uid(),title:draft.name,lang:draft.lang,createdAt:Date.now(),items};
+    db.banks.unshift(bank);
+    expanded.add(bank.id);
+    save();closeModal();tab='banks';render();
+    toast(`已保存 ${items.length} 个词语${skipped?`，去除 ${skipped} 个重复项`:''}。`);
   }
-  const bank={id:uid(),title:draft.name,lang:draft.lang,createdAt:Date.now(),items:checked};
-  db.banks.unshift(bank);
-  expanded.add(bank.id);
-  save();closeModal();tab='banks';render();toast(`已保存 ${checked.length} 个词语。`);
 }
 function getBank(bankId) {return db.banks.find(b=>b.id===bankId);}
 function openWordEditor(bankId,itemId) {
@@ -481,15 +535,68 @@ function jumpWord(delta,absolute=false){
   if(s.paused)updatePlayer();else executeStep();
 }
 
+function drawPhotoHolder() {
+  const holder=$('#photoHolder');
+  if(!holder)return;
+  if(!importFileUrl){holder.innerHTML='';$('#recognizeButton').disabled=true;return;}
+  holder.innerHTML=`<div class="crop-help">手指划出识别范围 · 拖动框内移动 · 拖动四角调整</div>
+  <div id="cropStage" class="crop-stage" role="group" aria-label="图片识别区域裁剪"><img id="cropImage" alt="待裁剪的照片" src="${esc(importFileUrl)}" draggable="false"><div id="cropBox" class="crop-box"><i class="crop-handle tl" data-handle="tl"></i><i class="crop-handle tr" data-handle="tr"></i><i class="crop-handle bl" data-handle="bl"></i><i class="crop-handle br" data-handle="br"></i></div></div>
+  <div class="crop-info"><span>只识别蓝框内的内容</span><button class="btn btn-small" data-action="reset-crop" type="button">重置选区</button></div>
+  <div class="hint">已选择：${esc(importFile?.name || '拍摄照片')}</div>`;
+  $('#recognizeButton').disabled=false;
+  syncCropBox();
+}
+function syncCropBox(){
+  const box=$('#cropBox');if(!box)return;
+  box.style.left=(crop.x*100)+'%';box.style.top=(crop.y*100)+'%';box.style.width=(crop.w*100)+'%';box.style.height=(crop.h*100)+'%';
+}
 function updatePhotoPreview(file){
   importFile=file;
   if(importFileUrl){URL.revokeObjectURL(importFileUrl);importFileUrl='';}
-  const holder=$('#photoHolder');if(!holder)return;
-  if(!file){holder.innerHTML='';$('#recognizeButton').disabled=true;return;}
-  importFileUrl=URL.createObjectURL(file);
-  holder.innerHTML=`<img class="ocr-preview" alt="待识别的照片" src="${esc(importFileUrl)}"><div class="hint">已选择：${esc(file.name || '拍摄照片')}</div>`;
-  $('#recognizeButton').disabled=false;
+  crop={x:.06,y:.06,w:.88,h:.88};
+  if(!file){drawPhotoHolder();return;}
+  importFileUrl=URL.createObjectURL(file);drawPhotoHolder();
 }
+function cropPosition(event,stage){
+  const r=stage.getBoundingClientRect();
+  return {x:Math.min(1,Math.max(0,(event.clientX-r.left)/r.width)), y:Math.min(1,Math.max(0,(event.clientY-r.top)/r.height))};
+}
+// Pointer events: draw on image, move inside box, resize from corners. Includes iOS touch.
+document.addEventListener('pointerdown',event=>{
+  const stage=event.target.closest('#cropStage');if(!stage||ocrBusy)return;
+  event.preventDefault();
+  const at=cropPosition(event,stage);
+  const handle=event.target.closest('[data-handle]')?.dataset.handle;
+  const mode=handle?'resize':event.target.closest('#cropBox')?'move':'draw';
+  cropPointer={id:event.pointerId,mode,handle,start:at,initial:{...crop}};
+  if(mode==='draw')crop={x:at.x,y:at.y,w:.01,h:.01};
+  stage.setPointerCapture(event.pointerId);syncCropBox();
+});
+document.addEventListener('pointermove',event=>{
+  const stage=$('#cropStage');
+  const p=cropPointer;if(!stage||!p||event.pointerId!==p.id)return;
+  event.preventDefault();
+  const at=cropPosition(event,stage),a=p.initial;
+  if(p.mode==='draw'){
+    crop={x:Math.min(at.x,p.start.x),y:Math.min(at.y,p.start.y),w:Math.abs(at.x-p.start.x),h:Math.abs(at.y-p.start.y)};
+  } else if(p.mode==='move'){
+    crop={...a,x:Math.min(1-a.w,Math.max(0,a.x+at.x-p.start.x)),y:Math.min(1-a.h,Math.max(0,a.y+at.y-p.start.y))};
+  } else {
+    const left=p.handle.includes('l')?at.x:a.x;
+    const right=p.handle.includes('r')?at.x:a.x+a.w;
+    const top=p.handle.includes('t')?at.y:a.y;
+    const bottom=p.handle.includes('b')?at.y:a.y+a.h;
+    crop={x:Math.min(left,right),y:Math.min(top,bottom),w:Math.abs(right-left),h:Math.abs(bottom-top)};
+  }
+  syncCropBox();
+});
+function finishCrop(event){
+  if(!cropPointer||event.pointerId!==cropPointer.id)return;
+  crop=clampCrop(crop);
+  cropPointer=null;syncCropBox();
+}
+document.addEventListener('pointerup',finishCrop);
+document.addEventListener('pointercancel',finishCrop);
 async function ensureOcr(){
   if(window.Tesseract)return;
   if(ocrLoading)return ocrLoading;
@@ -501,49 +608,65 @@ async function ensureOcr(){
   });
   try{await ocrLoading;}catch(error){ocrLoading=null;throw error;}
 }
-async function prepareImage(file){
+async function prepareImage(file,rect){
+  // Crop *before* handing the image to any OCR engine or sending it to the network.
   const url=URL.createObjectURL(file);
   try{
-    const image=new Image();
-    await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=reject;image.src=url;});
-    const max=1900;
-    const scale=Math.min(1,max/Math.max(image.naturalWidth,image.naturalHeight));
-    const width=Math.max(1,Math.round(image.naturalWidth*scale));
-    const height=Math.max(1,Math.round(image.naturalHeight*scale));
-    const c=document.createElement('canvas');c.width=width;c.height=height;
-    const ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);
-    ctx.drawImage(image,0,0,width,height);
-    return new Promise((resolve,reject)=>c.toBlob(blob=>blob?resolve(blob):reject(new Error('无法压缩图片')),'image/jpeg',.93));
+    const img=new Image();
+    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(new Error('无法读取照片，可尝试转换为 JPG'));img.src=url;});
+    const r=clampCrop(rect);
+    const sx=Math.min(img.naturalWidth-1,Math.round(r.x*img.naturalWidth));
+    const sy=Math.min(img.naturalHeight-1,Math.round(r.y*img.naturalHeight));
+    const sw=Math.max(1,Math.min(img.naturalWidth-sx,Math.round(r.w*img.naturalWidth)));
+    const sh=Math.max(1,Math.min(img.naturalHeight-sy,Math.round(r.h*img.naturalHeight)));
+    const scale=Math.min(1,2048/Math.max(sw,sh));
+    const w=Math.max(1,Math.round(sw*scale)),h=Math.max(1,Math.round(sh*scale));
+    const c=document.createElement('canvas');c.width=w;c.height=h;
+    const ctx=c.getContext('2d',{willReadFrequently:false});ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
+    ctx.imageSmoothingQuality='high';ctx.drawImage(img,sx,sy,sw,sh,0,0,w,h);
+    return new Promise((resolve,reject)=>c.toBlob(blob=>blob?resolve(blob):reject(new Error('无法导出裁剪图片')),'image/jpeg',.88));
   }finally{URL.revokeObjectURL(url);}
+}
+async function recognizeHandwriting(blob,lang){
+  const endpoint=db.settings.ocrEndpoint?.trim();
+  if(!validateOcrEndpoint(endpoint))throw new Error('手写识别未配置：请先在“设置”填写安全 Worker 接口地址。');
+  if(!ocrPin)throw new Error('请先到“设置”输入云端 OCR 的访问口令，再使用手写识别。');
+  if(blob.size>4*1024*1024)throw new Error('选区图片仍过大，请缩小选区后重试。');
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),35000);
+  try{
+    const resp=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'image/jpeg','X-OCR-PIN':ocrPin,'X-OCR-Lang':lang==='en-US'?'en':'zh'},body:blob,signal:controller.signal,cache:'no-store'});
+    const data=await resp.json().catch(()=>({error:'服务返回的内容不是 JSON'}));
+    if(!resp.ok)throw new Error(data.error||`服务返回 HTTP ${resp.status}`);
+    const lines=extractOcrLines(data);
+    if(!lines.length)throw new Error('手写服务没有识别出文字，请重新拍摄或改用手动输入。');
+    return lines.join('\n');
+  }finally{clearTimeout(timer);}
+}
+async function recognizePrint(blob,lang,onStatus){
+  await ensureOcr();
+  const worker=await Tesseract.createWorker(lang==='en-US'?'eng':'chi_sim',1,{
+    logger:m=>{if(m.status==='recognizing text')onStatus(`本机印刷体识别 ${Math.round((m.progress||0)*100)}%…`);}
+  });
+  try {const res=await worker.recognize(blob);return (res?.data?.text||'').trim();}
+  finally{await worker.terminate().catch(()=>{});}
 }
 async function runOcr(){
   if(ocrBusy||!importFile)return;
   ocrBusy=true;
-  const btn=$('#recognizeButton');const status=$('#ocrStatus');
-  btn.disabled=true;
+  const btn=$('#recognizeButton'),status=$('#ocrStatus');btn.disabled=true;
   const updateStatus=t=>{if(status)status.textContent=t;};
-  let worker=null;
   try{
-    updateStatus('准备识别程序，首次使用需要联网下载…');
-    await ensureOcr();
-    const input=await prepareImage(importFile);
-    const lang=$('#importLang').value==='en-US'?'eng':'chi_sim';
-    updateStatus('正在初始化 '+(lang==='eng'?'英文':'中文')+'识别模型…');
-    worker=await Tesseract.createWorker(lang,1,{
-      logger: m=>{
-        if(m.status==='recognizing text')updateStatus(`正在识别文字 ${Math.round((m.progress||0)*100)}%…`);
-      }
-    });
-    const result=await worker.recognize(input);
-    const text=result?.data?.text?.trim()||'';
-    if(!text){updateStatus('未识别出文字，建议重新拍摄或手动输入。');return;}
-    const textarea=$('#importText');
-    textarea.value=[textarea.value.trim(),text].filter(Boolean).join('\n');
-    updateStatus('识别完成，请逐条核对错字、换行与词语分隔。');
-    refreshImportPreview();
-    textarea.scrollIntoView({behavior:'smooth',block:'center'});
-  }catch(err){console.error(err);updateStatus(`识别失败：${err.message||'未知错误'}。可改为手动输入。`);}
-  finally{if(worker)await worker.terminate().catch(()=>{});ocrBusy=false;if(btn)btn.disabled=false;}
+    updateStatus('正在裁剪蓝框内的文字…');
+    const blob=await prepareImage(importFile,crop);
+    const lang=$('#importLang').value;
+    updateStatus(ocrKind==='handwriting'?'专用手写识别中（需要网络）…':'正在启动本机印刷体识别…');
+    const text=ocrKind==='handwriting'?await recognizeHandwriting(blob,lang):await recognizePrint(blob,lang,updateStatus);
+    if(!text){updateStatus('没有识别出词语，请缩小识别区域或手动输入。');return;}
+    const textarea=$('#importText');textarea.value=[textarea.value.trim(),text].filter(Boolean).join('\n');
+    updateStatus('识别完成，已将选区文字添加到下方。请仔细核对并切分词语。');
+    refreshImportPreview();textarea.scrollIntoView({behavior:'smooth',block:'nearest'});
+  }catch(err){console.error(err);updateStatus(`识别未完成：${err.name==='AbortError'?'网络超时':(err.message||'未知错误')}。不会自动改用低准确率引擎。`);}
+  finally{ocrBusy=false;if(btn)btn.disabled=false;}
 }
 function downloadBackup(){
   const blob=new Blob([JSON.stringify({version:1,exportedAt:new Date().toISOString(),...db},null,2)],{type:'application/json'});
@@ -577,6 +700,7 @@ function handleAction(button) {
     case 'close-modal':closeModal();break;
     case 'save-import':saveImport();break;
     case 'run-ocr':runOcr();break;
+    case 'reset-crop':crop={x:.06,y:.06,w:.88,h:.88};syncCropBox();break;
     case 'toggle-bank':expanded.has(bankId)?expanded.delete(bankId):expanded.add(bankId);render();break;
     case 'select-bank':{
       const b=getBank(bankId);if(!b)return;
@@ -585,7 +709,9 @@ function handleAction(button) {
       render();break;
     }
     case 'clear-selection':selected.clear();render();break;
-    case 'add-word':openWordEditor(bankId);break;
+    case 'add-words-manual':openImport(false,bankId,'manual');break;
+    case 'add-words-photo':openImport(false,bankId,'photo');break;
+    case 'dedupe-review':dedupeImportReview();break;
     case 'edit-word':openWordEditor(bankId,itemId);break;
     case 'toggle-char':{const i=Number(button.dataset.index);editingMarks.has(i)?editingMarks.delete(i):editingMarks.add(i);drawCharGrid();break;}
     case 'save-word':saveWord();break;
@@ -618,6 +744,7 @@ function handleAction(button) {
     }
     case 'play-group':source={type:'group',id:groupId};setTab('practice');break;
     case 'play-selected':source={type:'selected'};setTab('practice');break;
+    case 'set-word-gap': db.settings.wordGap=Number(button.dataset.seconds); save(); render(); break;
     case 'start-play':beginPlayback();break;
     case 'stop-play':stopPlayback();break;
     case 'toggle-pause':if(session?.paused)resumePlayback();else pausePlayback();break;
@@ -645,7 +772,7 @@ document.addEventListener('click',event=>{
   const action=event.target.closest('[data-action]');if(action){handleAction(action);return;}
 });
 $('#quickHelp').addEventListener('click',()=>modal('使用方法',`<ol class="help-list">
-  <li><strong>添加词语：</strong>可以直接逐行手动输入、批量粘贴，也可以从课本拍照、相册选图；下一步可逐项检查后保存。</li>
+  <li><strong>添加词语：</strong>已有词库卡片内直接选“手动输入添加”或“拍照识别添加”，新词会追加、不覆盖；中文空格自动拆分，英语按行保留短语。</li>
   <li><strong>标拼音：</strong>打开中文词库，点击某个词语的“编辑”，再点亮需要写拼音的汉字。</li>
   <li><strong>做组合：</strong>跨词库勾选多个词语，保存成组合或直接开始听写。</li>
   <li><strong>设置播报：</strong>选顺序/随机、每词报1—5遍、重复间隔、词间等待，再开始播报。</li>
@@ -661,6 +788,8 @@ document.addEventListener('change',event=>{
     updatePhotoPreview(target.files?.[0]);return;
   }
   if(target.id==='importLang'||target.id==='importSplit'){refreshImportPreview();return;}
+  if(target.name==='ocrKind'){ocrKind=target.value;return;}
+  if(target.id==='ocrPin'){ocrPin=target.value;return;}
   if(target.dataset.reviewText){updateReviewText(target.dataset.reviewText,target.value);refreshReviewChars(target.dataset.reviewText);return;}
   if(target.id==='practiceSource'){
     const val=target.value;
@@ -673,13 +802,18 @@ document.addEventListener('change',event=>{
     if(setting==='skipDuplicates'||setting==='hideAnswers')db.settings[setting]=target.checked;
     else if(setting==='repetitions')db.settings.repetitions=Number(target.value);
     else if(['rateEn','rateZh','wordGap','repeatGap'].includes(setting))db.settings[setting]=Number(target.value);
-    else db.settings[setting]=target.value;
+    else if(setting==='ocrEndpoint'){
+      const val=target.value.trim();
+      if(val && !validateOcrEndpoint(val)){toast('识别地址必须为有效的 HTTPS 地址，且建议以 /ocr 结尾。');return;}
+      db.settings.ocrEndpoint=val;
+    } else db.settings[setting]=target.value;
     save();render();
   }
 });
 document.addEventListener('input',event=>{
   const target=event.target;
   if(target.id==='importText'){refreshImportPreview();return;}
+  if(target.id==='ocrPin'){ocrPin=target.value;return;}
   if(target.dataset.reviewText){updateReviewText(target.dataset.reviewText,target.value);return;}
   if(target.id==='editorText'){
     editingMarks.clear();drawCharGrid();return;
