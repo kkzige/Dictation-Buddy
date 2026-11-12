@@ -18,7 +18,7 @@
   <div class="app-frame">
     <header class="topbar">
       <div class="brand-icon" aria-hidden="true">听</div>
-      <div class="brand-title"><span>听写小助手</span><small>Dictation Buddy · v0.3.1</small></div>
+      <div class="brand-title"><span>听写小助手</span><small>Dictation Buddy · v0.3.2</small></div>
       <button class="icon-button" type="button" id="quickHelp" aria-label="使用帮助" title="使用帮助">?</button>
     </header>
     <main id="mainContent" aria-live="off"></main>
@@ -35,6 +35,7 @@
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
       <header class="modal-header"><h2 id="modalTitle"></h2><button class="icon-button" type="button" data-action="close-modal" aria-label="关闭">✕</button></header>
       <div id="modalBody" class="modal-body"></div>
+      <footer id="modalActionBar" class="modal-actionbar" hidden aria-label="识别步骤操作"></footer>
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -4,8 +4,10 @@ import {
   isChineseCharacter, indicesToPrompt, clamp, prepareBankEntries, normalizeTermKey
 } from './core.js';
 import {validateOcrEndpoint, extractOcrLines, clampCrop} from './ocr-utils.js';
+import {isNewerVersion} from './version-utils.js';
 
-const STORAGE_KEY = 'dictation-buddy-v0.1-data';
+const STORAGE_KEY = 'dictation-buddy-v0.1-data'; // Keep unchanged across program updates
+const APP_VERSION = '0.3.2';
 const OCR_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; // OCR only, fetched on demand
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -31,6 +33,10 @@ let importReviewExpanded = new Set();
 let importFileUrl = '';
 let crop = {x:.06,y:.06,w:.88,h:.88};
 let cropPointer = null;
+let confirmedCropBlob = null;
+let confirmedCropUrl = '';
+let updateState = {latest:null, notes:'', checked:false, checking:false, applying:false, message:'尚未检查更新'};
+let applyingUpdate = false;
 let ocrKind = 'handwriting'; // deliberate choice: never silently use print OCR for handwriting
 let ocrPin = ''; // never persisted or exported
 
@@ -54,6 +60,8 @@ function modal(title, body) {
   $('#modalBody').innerHTML = body;
   $('#overlay').hidden = false;
   $('#overlay').setAttribute('aria-hidden', 'false');
+  $('#modalActionBar').hidden = true;
+  $('#modalActionBar').innerHTML = '';
   document.body.style.overflow = 'hidden';
 }
 function closeModal() {
@@ -61,6 +69,8 @@ function closeModal() {
   $('#overlay').hidden = true;
   $('#overlay').setAttribute('aria-hidden', 'true');
   $('#modalBody').innerHTML = '';
+  $('#modalActionBar').innerHTML = '';
+  $('#modalActionBar').hidden = true;
   document.body.style.overflow = '';
   importFile = null;
   importDraft = null;
@@ -68,6 +78,7 @@ function closeModal() {
   importReviewExpanded.clear();
   if (importFileUrl) { URL.revokeObjectURL(importFileUrl); importFileUrl = ''; }
   cropPointer=null;
+  clearConfirmedCrop();
 
   editorContext = null;
 }
@@ -76,6 +87,7 @@ function setTab(next) {
   tab = next;
   window.scrollTo({top:0,behavior:'instant'});
   render();
+  if(next==='settings' && !updateState.checked && !updateState.checking) void checkForUpdate();
 }
 function totalWords() {return db.banks.reduce((sum,b) => sum + b.items.length,0);}
 function allSelectedRefs() {
@@ -206,8 +218,96 @@ function voiceOptions(lang, chosen) {
   const voices=speechSynthesis.getVoices().filter(v=>lang==='zh-CN'?v.lang.toLowerCase().startsWith('zh'):v.lang.toLowerCase().startsWith('en'));
   return `<option value="">系统自动选择</option>${voices.map(v=>`<option value="${esc(v.voiceURI)}" ${v.voiceURI===chosen?'selected':''}>${esc(v.name)} (${esc(v.lang)})${v.localService?' · 本机':''}</option>`).join('')}`;
 }
+function updatePanelHtml(){
+  const ready=updateState.latest && isNewerVersion(updateState.latest,APP_VERSION);
+  const label=updateState.message || '尚未检查更新';
+  return `<div class="card-head"><div><h3 style="margin:0 0 6px">应用版本与更新</h3><div class="subtext">当前版本：<strong>V${APP_VERSION}</strong></div></div><span class="badge">PWA</span></div>
+    <p class="update-status" role="status">${esc(label)}</p>
+    ${ready && updateState.notes ? `<p class="subtext">新版说明：${esc(updateState.notes)}</p>` : ''}
+    <div class="action-row"><button type="button" class="btn ${ready?'btn-subtle':'btn-primary'}" data-action="check-update" ${updateState.checking||updateState.applying?'disabled':''}>${updateState.checking?'检查中…':'检查更新'}</button>
+    ${ready?`<button type="button" class="btn btn-primary" data-action="apply-update" ${updateState.checking||updateState.applying?'disabled':''}>${updateState.applying?'正在更新…':'立即更新到 V'+esc(updateState.latest)}</button>`:''}</div>
+    <div class="setting-help">新版需先发布到 GitHub Pages。更新仅替换程序文件，不会主动清空本地词库；更新前仍建议导出 JSON 备份。需要联网。</div>`;
+}
+function refreshUpdatePanel(){
+  const panel=$('#appUpdatePanel');if(panel)panel.innerHTML=updatePanelHtml();
+}
+async function registrationForUpdate(){
+  if(!('serviceWorker' in navigator))return null;
+  let reg=await navigator.serviceWorker.getRegistration('./');
+  if(!reg) reg=await navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'});
+  return reg;
+}
+async function checkForUpdate(){
+  if(updateState.checking||updateState.applying)return;
+  updateState.checking=true;updateState.message='正在联网检查 GitHub Pages 上的最新版本…';refreshUpdatePanel();
+  try{
+    const url=new URL('./version.json',window.location.href);
+    url.searchParams.set('t',String(Date.now())); // The old service worker must not serve a cached version manifest.
+    const response=await fetch(url.href,{cache:'no-store'});
+    if(!response.ok)throw new Error('更新清单未发布（HTTP '+response.status+'）');
+    const info=await response.json();
+    if(!/^\d+\.\d+\.\d+$/.test(info?.version||'')) throw new Error('远端版本清单格式不正确');
+    updateState.latest=info.version;
+    updateState.notes=typeof info.notes==='string'?info.notes.slice(0,240):'';
+    updateState.checked=true;
+    if(isNewerVersion(info.version,APP_VERSION)){
+      const reg=await registrationForUpdate();
+      await reg?.update();
+      updateState.message='发现新版本 V'+info.version+'，可点击「立即更新」。';
+    }else{
+      updateState.message='当前已是最新版本 V'+APP_VERSION+'。';
+    }
+  }catch(error){
+    updateState.message='检查失败：'+(error.message||'网络不可用')+'。请确认已经部署 version.json 并联网重试。';
+  }finally{updateState.checking=false;refreshUpdatePanel();}
+}
+function waitForWorkerInstalled(reg,timeoutMs=12000){
+  return new Promise(resolve=>{
+    if(reg.waiting){resolve(reg.waiting);return;}
+    const worker=reg.installing;
+    if(!worker){resolve(null);return;}
+    let done=false;
+    const finish=result=>{if(done)return;done=true;clearTimeout(timer);worker.removeEventListener('statechange',onState);resolve(result);};
+    const onState=()=>{
+      if(reg.waiting)finish(reg.waiting);
+      else if(worker.state==='activated')finish(null);
+      else if(worker.state==='redundant')finish(null);
+      // A fresh SW may install and immediately activate; wait for activation before reloading.
+    };
+    const timer=setTimeout(()=>finish(null),timeoutMs);
+    worker.addEventListener('statechange',onState);
+    onState();
+  });
+}
+async function applyAvailableUpdate(){
+  if(updateState.applying||!updateState.latest||!isNewerVersion(updateState.latest,APP_VERSION))return;
+  updateState.applying=true;updateState.message='正在获取新版程序，请保持网络连接…';refreshUpdatePanel();
+  try{
+    const reg=await registrationForUpdate();
+    if(!reg){updateState.message='浏览器未启用离线更新机制，尝试重新打开最新版网页。';window.location.reload();return;}
+    await reg.update();
+    const waiting=await waitForWorkerInstalled(reg);
+    if(waiting){
+      applyingUpdate=true;
+      updateState.message='已获取新版，正在切换程序…';refreshUpdatePanel();
+      const reload=()=>{if(!applyingUpdate)return;applyingUpdate=false;const next=new URL('./',location.href);next.searchParams.set('updated',String(Date.now()));location.replace(next.href);};
+      navigator.serviceWorker.addEventListener('controllerchange',reload,{once:true});
+      waiting.postMessage({type:'SKIP_WAITING'});
+      // Fallback for iOS versions that do not dispatch controllerchange reliably.
+      setTimeout(reload,3500);
+      return;
+    }
+    // A newly activated service worker may have taken control automatically.
+    updateState.message='正在重新载入新版程序…';refreshUpdatePanel();
+    const next=new URL('./',location.href);next.searchParams.set('updated',String(Date.now()));location.replace(next.href);
+  }catch(err){
+    updateState.message='更新未完成：'+(err.message||'网络错误')+'。旧版仍可继续使用。';
+    updateState.applying=false;refreshUpdatePanel();
+  }
+}
 function renderSettings() {
   return `<div class="page-header"><div><div class="eyebrow">PREFERENCES & DATA</div><h1 class="page-title">设置与备份</h1><p class="page-description">调整声音风格、保护词库，方便长期使用。</p></div></div>
+  <section class="setting-panel" id="appUpdatePanel">${updatePanelHtml()}</section>
   <section class="setting-panel"><h3>语音音色与语速</h3>
   <label class="field"><span>中文音色</span><select name="zhVoice">${voiceOptions('zh-CN',db.settings.zhVoice)}</select></label>
   <label class="field"><span>英语音色</span><select name="enVoice">${voiceOptions('en-US',db.settings.enVoice)}</select></label>
@@ -218,7 +318,7 @@ function renderSettings() {
   <section class="setting-panel"><h3>词库数据</h3><p class="subtext">当前 ${db.banks.length} 份词库，${totalWords()} 个词语，${db.groups.length} 个组合。数据只存当前浏览器，不会自动同步到其他设备。</p>
   <div class="action-row"><button class="btn btn-primary" data-action="export-backup">导出 JSON 备份</button><label class="btn" for="backupFile">导入 JSON 备份</label><input type="file" id="backupFile" accept="application/json,.json" class="visually-hidden-file"></div>
   <div class="small-note warning-note">Safari 清理网站数据、删除主屏幕应用，或更换设备时，词库可能丢失。建议每周导出备份。导入备份会替换当前所有词库与组合。</div></section>
-  <section class="setting-panel"><h3>手写识别服务（需配置一次）</h3><p class="subtext">手写体改用百度智能云的专用手写 OCR。GitHub Pages 不能安全保管密钥，因此需要单独部署提供的 Cloudflare Worker。</p>
+  <section class="setting-panel"><h3>手写识别服务（需配置一次）</h3><p class="subtext">手写体改用百度智能云的专用手写 OCR。GitHub Pages 不能安全保管密钥，因此需要另外部署 Cloudflare Worker 并配置服务端密钥。</p>
   <label class="field"><span>Worker 识别接口地址</span><input name="ocrEndpoint" type="url" placeholder="https://你的服务.workers.dev/ocr" value="${esc(db.settings.ocrEndpoint)}" autocomplete="off"><small class="hint">仅保存公开接口地址，不保存服务商密钥。</small></label>
   <label class="field"><span>访问口令（本次打开应用有效）</span><input id="ocrPin" type="password" placeholder="Worker 中设置的 OCR_ACCESS_PIN" autocomplete="off" value="${esc(ocrPin)}"><small class="hint">口令只放在内存中，不写入词库备份或本地存储。退出或刷新后可能需重新输入。</small></label>
   <p class="subtext">使用云识别时，只有裁剪后的选区图片会发送给 Worker 和百度 OCR；印刷体本机识别不会上传照片。涉及未成年人信息时请避免拍入姓名、学校等个人内容。</p></section>
@@ -249,17 +349,15 @@ function openImport(restore = false, targetBankId = null, preferredMode = 'manua
     <div class="field"><span>拍照或从相册选择图片</span><div class="action-row"><label class="btn btn-subtle" for="cameraFile">📷 拍照</label><input type="file" id="cameraFile" accept="image/*" capture="environment" class="visually-hidden-file"><label class="btn" for="galleryFile">▧ 相册选取</label><input type="file" id="galleryFile" accept="image/*" class="visually-hidden-file"></div></div>
     <div class="field"><span>识别类型</span><div class="option-grid"><label class="choice"><input type="radio" name="ocrKind" value="handwriting" ${ocrKind==='handwriting'?'checked':''}>✍️ 手写体（专用云识别）</label><label class="choice"><input type="radio" name="ocrKind" value="printed" ${ocrKind==='printed'?'checked':''}>▤ 印刷体（本机识别）</label></div></div>
     <div id="photoHolder"></div>
-    <button class="btn btn-subtle btn-wide" id="recognizeButton" data-action="run-ocr" disabled style="margin-top:10px">只识别框选区域</button>
-    <div id="ocrStatus" class="ocr-status">请先选择图片，用手指拖动方框或角点。手写体识别需要先在“设置”配置云端接口。</div>
+    <div id="ocrStatus" class="ocr-status" role="status">先拍照或选图，拖动蓝框选择文字；确认选区后才能识别。手写体需要配置云端接口。</div>
     <small class="hint">识别结果需要人工核对；不要把姓名等隐私信息放进框选区域。</small>
   </section>
   <label class="field"><span>${importMode==='manual'?'输入或粘贴词语':'识别结果 / 手动补充词语'}</span><textarea id="importText" rows="7" placeholder="每行一个词语，例如：\n崎岖\n拥抱\n坚韧">${esc(old?.entries.map(x=>x.text).join('\n') || '')}</textarea><small class="hint">单个词语直接输入一行即可；多项内容可批量粘贴。下一步逐条检查和标记拼音字。</small></label>
   <label class="field"><span>拆分方式</span><select id="importSplit"><option value="auto" selected>自动识别分隔（推荐：中文空格自动切分，英文保留短语）</option><option value="line">严格按行（一个整行作为词语）</option><option value="punct">按换行、逗号、顿号、分号拆分</option><option value="spaces">按空格、换行及标点拆分</option></select></label>
   <div class="small-note" id="importPreview">输入后会显示词语数量和部分预览。</div>
   <button class="btn btn-primary btn-wide" data-action="review-import">下一步 · 核对词语和拼音标记</button>`);
-  if(importFile && importFileUrl){
-    drawPhotoHolder();
-  }
+  if(importFile && importFileUrl) drawPhotoHolder();
+  updateCropActionBar();
   refreshImportPreview();
 }
 function setImportMode(mode) {
@@ -270,6 +368,7 @@ function setImportMode(mode) {
   });
   $('#manualImportPanel').hidden=importMode!=='manual';
   $('#photoImportPanel').hidden=importMode!=='photo';
+  updateCropActionBar();
 }
 function refreshImportPreview() {
   const raw=$('#importText')?.value ?? '';
@@ -535,16 +634,58 @@ function jumpWord(delta,absolute=false){
   if(s.paused)updatePlayer();else executeStep();
 }
 
-function drawPhotoHolder() {
+function clearConfirmedCrop(){
+  confirmedCropBlob = null;
+  if(confirmedCropUrl){ URL.revokeObjectURL(confirmedCropUrl); confirmedCropUrl=''; }
+}
+function updateCropActionBar(){
+  const bar = $('#modalActionBar');
+  if(!bar) return;
+  const active = !$('#overlay').hidden && importMode==='photo' && !!$('#photoImportPanel') && !!importFile;
+  bar.hidden = !active;
+  if(!active){bar.innerHTML='';return;}
+  const isConfirmed = !!confirmedCropBlob;
+  bar.innerHTML = `<div class="crop-action-caption" id="cropFooterStatus">${ocrBusy?'正在处理选区，请勿退出…':isConfirmed?'✓ 已确认选区 · 可开始识别':'第 1 步 / 2 步 · 确认蓝框内的文字范围'}</div>
+    <div class="crop-action-buttons">${isConfirmed?`<button type="button" class="btn" data-action="edit-crop" ${ocrBusy?'disabled':''}>重新框选</button>`:''}
+    <button type="button" class="btn btn-primary crop-confirm-button" data-action="${isConfirmed?'run-ocr':'confirm-crop'}" ${ocrBusy?'disabled':''}>${ocrBusy?'正在处理…':isConfirmed?'第 2 步 · 开始识别文字':'✓ 确认选区'}</button></div>`;
+}
+function drawPhotoHolder(){
   const holder=$('#photoHolder');
   if(!holder)return;
-  if(!importFileUrl){holder.innerHTML='';$('#recognizeButton').disabled=true;return;}
-  holder.innerHTML=`<div class="crop-help">手指划出识别范围 · 拖动框内移动 · 拖动四角调整</div>
-  <div id="cropStage" class="crop-stage" role="group" aria-label="图片识别区域裁剪"><img id="cropImage" alt="待裁剪的照片" src="${esc(importFileUrl)}" draggable="false"><div id="cropBox" class="crop-box"><i class="crop-handle tl" data-handle="tl"></i><i class="crop-handle tr" data-handle="tr"></i><i class="crop-handle bl" data-handle="bl"></i><i class="crop-handle br" data-handle="br"></i></div></div>
-  <div class="crop-info"><span>只识别蓝框内的内容</span><button class="btn btn-small" data-action="reset-crop" type="button">重置选区</button></div>
+  if(!importFileUrl){holder.innerHTML='';updateCropActionBar();return;}
+  if(confirmedCropBlob && confirmedCropUrl){
+    holder.innerHTML = `<div class="crop-confirmed"><div class="crop-confirmed-title">✓ 选区已确认</div>
+    <div class="crop-help">下面是将要识别的内容，框外文字不会上传或参与识别。</div>
+    <img class="crop-result-preview" src="${esc(confirmedCropUrl)}" alt="已裁剪的识别区域预览">
+    </div>`;
+    updateCropActionBar();return;
+  }
+  holder.innerHTML=`<div class="crop-help">① 拖动蓝框、四角或在照片上重新框选，选好后点下方「确认选区」。</div>
+  <div class="crop-stage-wrap"><div id="cropStage" class="crop-stage" role="group" aria-label="图片识别区域裁剪"><img id="cropImage" alt="待裁剪的照片" src="${esc(importFileUrl)}" draggable="false"><div id="cropBox" class="crop-box"><i class="crop-handle tl" data-handle="tl"></i><i class="crop-handle tr" data-handle="tr"></i><i class="crop-handle bl" data-handle="bl"></i><i class="crop-handle br" data-handle="br"></i></div></div></div>
+  <div class="crop-info"><span>框外内容不会识别</span><button class="btn btn-small" data-action="reset-crop" type="button">重置选区</button></div>
   <div class="hint">已选择：${esc(importFile?.name || '拍摄照片')}</div>`;
-  $('#recognizeButton').disabled=false;
-  syncCropBox();
+  syncCropBox();updateCropActionBar();
+}
+async function confirmCrop(){
+  if(ocrBusy || !importFile || confirmedCropBlob) return;
+  ocrBusy=true;updateCropActionBar();
+  const status=$('#ocrStatus');if(status)status.textContent='正在生成选区预览…';
+  try{
+    confirmedCropBlob=await prepareImage(importFile, crop);
+    confirmedCropUrl=URL.createObjectURL(confirmedCropBlob);
+    drawPhotoHolder();
+    $('#photoHolder')?.scrollIntoView({behavior:'smooth',block:'start'});
+    if(status)status.textContent='选区已确认。核对上方预览，然后点击底部「开始识别文字」，如不对可重新框选。';
+  }catch(err){
+    clearConfirmedCrop();
+    if(status)status.textContent='裁剪失败：'+(err.message||'无法处理图片')+'。请更换图片。';
+  }finally{ocrBusy=false;updateCropActionBar();}
+}
+function editCrop(){
+  if(ocrBusy) return;
+  clearConfirmedCrop();drawPhotoHolder();
+  $('#photoHolder')?.scrollIntoView({behavior:'smooth',block:'start'});
+  const status=$('#ocrStatus');if(status)status.textContent='请重新调整蓝框，完成后点击底部「确认选区」。';
 }
 function syncCropBox(){
   const box=$('#cropBox');if(!box)return;
@@ -552,10 +693,12 @@ function syncCropBox(){
 }
 function updatePhotoPreview(file){
   importFile=file;
+  clearConfirmedCrop();
   if(importFileUrl){URL.revokeObjectURL(importFileUrl);importFileUrl='';}
   crop={x:.06,y:.06,w:.88,h:.88};
   if(!file){drawPhotoHolder();return;}
   importFileUrl=URL.createObjectURL(file);drawPhotoHolder();
+  $('#photoHolder')?.scrollIntoView({behavior:'smooth',block:'start'});
 }
 function cropPosition(event,stage){
   const r=stage.getBoundingClientRect();
@@ -652,12 +795,13 @@ async function recognizePrint(blob,lang,onStatus){
 }
 async function runOcr(){
   if(ocrBusy||!importFile)return;
-  ocrBusy=true;
-  const btn=$('#recognizeButton'),status=$('#ocrStatus');btn.disabled=true;
-  const updateStatus=t=>{if(status)status.textContent=t;};
+  if(!confirmedCropBlob){toast('请先点击底部的「确认选区」。');return;}
+  ocrBusy=true;updateCropActionBar();
+  const status=$('#ocrStatus');
+  const updateStatus=t=>{if(status)status.textContent=t;const label=$('#cropFooterStatus');if(label)label.textContent=t;};
   try{
-    updateStatus('正在裁剪蓝框内的文字…');
-    const blob=await prepareImage(importFile,crop);
+    updateStatus('已确认的选区正在识别…');
+    const blob=confirmedCropBlob;
     const lang=$('#importLang').value;
     updateStatus(ocrKind==='handwriting'?'专用手写识别中（需要网络）…':'正在启动本机印刷体识别…');
     const text=ocrKind==='handwriting'?await recognizeHandwriting(blob,lang):await recognizePrint(blob,lang,updateStatus);
@@ -666,7 +810,7 @@ async function runOcr(){
     updateStatus('识别完成，已将选区文字添加到下方。请仔细核对并切分词语。');
     refreshImportPreview();textarea.scrollIntoView({behavior:'smooth',block:'nearest'});
   }catch(err){console.error(err);updateStatus(`识别未完成：${err.name==='AbortError'?'网络超时':(err.message||'未知错误')}。不会自动改用低准确率引擎。`);}
-  finally{ocrBusy=false;if(btn)btn.disabled=false;}
+  finally{ocrBusy=false;updateCropActionBar();}
 }
 function downloadBackup(){
   const blob=new Blob([JSON.stringify({version:1,exportedAt:new Date().toISOString(),...db},null,2)],{type:'application/json'});
@@ -699,7 +843,11 @@ function handleAction(button) {
     case 'toggle-review-char':{const id=button.dataset.row;const item=importDraft?.entries.find(w=>w.id===id);if(!item)return;const i=Number(button.dataset.index);if(item.marks.includes(i))item.marks=item.marks.filter(n=>n!==i);else item.marks=[...item.marks,i].sort((a,b)=>a-b);updateReviewRow(id);break;}
     case 'close-modal':closeModal();break;
     case 'save-import':saveImport();break;
-    case 'run-ocr':runOcr();break;
+    case 'run-ocr':void runOcr();break;
+    case 'confirm-crop':void confirmCrop();break;
+    case 'edit-crop':editCrop();break;
+    case 'check-update':void checkForUpdate();break;
+    case 'apply-update':void applyAvailableUpdate();break;
     case 'reset-crop':crop={x:.06,y:.06,w:.88,h:.88};syncCropBox();break;
     case 'toggle-bank':expanded.has(bankId)?expanded.delete(bankId):expanded.add(bankId);render();break;
     case 'select-bank':{
@@ -830,6 +978,6 @@ if('speechSynthesis' in window){
   speechSynthesis.addEventListener?.('voiceschanged',()=>{if(tab==='settings'&&$('#overlay').hidden)render();});
 }
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-  navigator.serviceWorker.register('./sw.js').catch(error=>console.warn('Service Worker 注册失败',error));
+  navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).catch(error=>console.warn('Service Worker 注册失败',error));
 }
 render();
