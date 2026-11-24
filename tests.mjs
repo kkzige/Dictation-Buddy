@@ -37,17 +37,17 @@ assert.ok(app.includes('voiceFineTunePanel()+ceremonyPanel()'));
 assert.ok(app.includes('function playCue(s,kind,onDone)'));
 assert.ok(app.includes('ensureAudioContext();'));
 assert.ok(app.includes('s.cueNodes=[]'));
-assert.ok(app.includes('const APP_VERSION = \'0.3.5\''));
+assert.ok(app.includes('const APP_VERSION = \'0.3.7\''));
 const sw=fs.readFileSync('./sw.js','utf8');
-assert.ok(sw.includes('v0.3.5'));
+assert.ok(sw.includes('v0.3.7'));
 assert.ok(sw.includes("url.pathname.endsWith('/manual.html')?'./manual.html':'./index.html'"));
-console.log('PASS: 23 source/domain assertions, version, old data, parsed terms, cues, existing timing');
+console.log('PASS: source/domain assertions, version, old data, parsed terms, cues, existing timing');
 // Render and inspect the exact template functions in an isolated VM without browser access.
 import vm from 'node:vm';
 const htmlFunctions=app.slice(app.indexOf('function orderRadio()'), app.indexOf('function renderPractice()'));
-const voiceFn=app.slice(app.indexOf('function voiceOptions('),app.indexOf('function updatePanelHtml()'));
+const voiceFn=app.slice(app.indexOf('function voicesFor('),app.indexOf('function updatePanelHtml()'));
 const settings=normalizeDb(null).settings;
-const vmCtx={db:{settings},speechSynthesis:{getVoices:()=>[{lang:'zh-CN',name:'中文女声',voiceURI:'zh1',localService:true},{lang:'en-US',name:'US English',voiceURI:'en1',localService:true}]},window:{speechSynthesis:{}},esc:x=>String(x)};
+const vmCtx={db:{settings},speechSynthesis:{getVoices:()=>[{lang:'zh-CN',name:'中文女声',voiceURI:'zh1',localService:true},{lang:'en-US',name:'US English',voiceURI:'en1',localService:true}]},window:{speechSynthesis:{}},esc:x=>String(x),musicLabel:()=> '未设置 MP3',customMusic:{intro:null,outro:null}};
 vm.createContext(vmCtx);
 vm.runInContext(voiceFn+ '\n'+htmlFunctions+'\n globalThis._sample=()=>({mini:settingsMini(),voice:voiceFineTunePanel(),ceremony:ceremonyPanel()});',vmCtx);
 const sample=vmCtx._sample();
@@ -57,4 +57,34 @@ for (const setting of ['rateZh','rateEn','zhVoice','enVoice','pitchZh','pitchEn'
 for (const setting of ['introCue','outroCue','jingleVolume'])assert.ok(sample.ceremony.includes(`name="${setting}"`),setting);
 assert.ok(sample.voice.includes('中文女声'));
 assert.ok(sample.voice.includes('US English'));
+assert.ok(sample.voice.includes('voice-gallery'));
+assert.ok(sample.ceremony.includes('Dir_OP.mp3'));
+assert.ok(sample.ceremony.includes('Dir_EP.mp3'));
+assert.ok(app.includes("case 'audition-voice'"));
+assert.ok(app.includes("case 'pick-voice'"));
+assert.ok(app.includes("['intro','outro']"));
 console.log('PASS: rendered settings templates preserve original cadence, display usable voices, cue choices');
+// MP3 sequencing contract: cue must not advance to spoken prompt before the 'ended' event.
+{
+  const source=app.slice(app.indexOf('function playCue('),app.indexOf('\nfunction speakOnce('));
+  let created=null,called=0;
+  class FakeAudio {
+    constructor(){this.onended=null;this.onerror=null;created=this;this.volume=1;}
+    play(){return Promise.resolve();}
+    pause(){}
+  }
+  const ctx={currentMusic:()=>({url:'blob:demo'}),Audio:FakeAudio,db:{settings:{jingleVolume:.4}},toast:()=>{},playOriginalCue:()=>{throw new Error('fallback called')},console};
+  vm.runInNewContext(source+'\n globalThis.demoPlayCue=playCue;',ctx);
+  const s={musicPlayer:new FakeAudio()};
+  ctx.demoPlayCue(s,'intro',()=>called++);
+  assert.equal(called,0,'prompt must NOT speak while MP3 is still playing');
+  assert.equal(created.volume,.4);
+  created.onended();
+  assert.equal(called,1,'prompt starts once music is fully ended');
+  assert.equal(created.onended,null);
+}
+const audioStore=fs.readFileSync('./audio-store.js','utf8');
+assert.ok(audioStore.includes('indexedDB.open('));
+assert.ok(audioStore.includes('new Blob('));
+for(const name of ['Dir_OP.mp3','Dir_EP.mp3'])assert.ok(app.includes(name));
+console.log('PASS: MP3 onended boundary prevents premature speech, name mapping, indexedDB storage');

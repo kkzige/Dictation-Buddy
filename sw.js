@@ -1,6 +1,6 @@
 // Versioned application shell; the user's word library remains exclusively in localStorage.
-const CACHE = 'dictation-buddy-v0.3.5';
-const SHELL = ['./', './index.html', './manual.html', './styles.css?v=0.3.5', './app.js?v=0.3.5', './core.js', './ocr-utils.js', './version-utils.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png'];
+const CACHE = 'dictation-buddy-v0.3.7';
+const SHELL = ['./', './index.html', './manual.html', './styles.css?v=0.3.7', './app.js?v=0.3.7', './core.js', './ocr-utils.js', './version-utils.js', './audio-store.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png', './assets/audio/Dir_OP.mp3', './assets/audio/Dir_EP.mp3'];
 self.addEventListener('install', event => {
   event.waitUntil((async()=>{
     await (await caches.open(CACHE)).addAll(SHELL);

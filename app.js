@@ -5,9 +5,10 @@ import {
 } from './core.js';
 import {clampCrop} from './ocr-utils.js';
 import {isNewerVersion} from './version-utils.js';
+import {saveMusic, loadMusic, removeMusic} from './audio-store.js';
 
 const STORAGE_KEY = 'dictation-buddy-v0.1-data'; // Keep unchanged across program updates
-const APP_VERSION = '0.3.5';
+const APP_VERSION = '0.3.7';
 const OCR_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; // OCR only, fetched on demand
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -42,6 +43,63 @@ let ocrBusy = false;
 let ocrLoading = null;
 let toastTimer = 0;
 let audioContext = null;
+// Optional music is a local IndexedDB file or a deployed assets/audio/Dir_OP.mp3, Dir_EP.mp3.
+// Music is NOT included in the word-bank JSON backup, and never uploaded to a server.
+const customMusic = {intro:null, outro:null};
+const bundledMusic = {intro:null,outro:null};
+let musicPreview = null;
+let storedAudioLoaded = false;
+function revokeMusic(kind){
+  const old=customMusic[kind];
+  if(old?.url) URL.revokeObjectURL(old.url);
+  customMusic[kind]=null;
+}
+function currentMusic(kind){return customMusic[kind]||bundledMusic[kind]||null;}
+function musicLabel(kind){
+  const file=currentMusic(kind);
+  if(file) return `${file.name} · ${file.source==='local'?'已保存本机':'随项目发布'}`;
+  return '未设置 MP3，将使用原有短提示音';
+}
+async function loadUserMusic(){
+  for(const kind of ['intro','outro']){
+    try{
+      const record=await loadMusic(kind);
+      if(record?.blob){revokeMusic(kind);customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob)};}
+    }catch(err){console.warn('本机 MP3 读取失败',kind,err);}
+  }
+  storedAudioLoaded=true;
+  if(tab==='practice'&&!session)render();
+}
+async function checkBundledMusic(){
+  for(const [kind,filename] of [['intro','Dir_OP.mp3'],['outro','Dir_EP.mp3']]){
+    const url=new URL(`./assets/audio/${filename}`,import.meta.url).href;
+    try {
+      const response=await fetch(url,{method:'HEAD',cache:'no-store'});
+      if(response.ok && !String(response.headers.get('content-type')||'').includes('text/html')){
+        bundledMusic[kind]={name:filename,source:'bundled',url};
+      }
+    }catch(err){/* Optional audio may not be published yet; original cue remains available. */}
+  }
+  if(tab==='practice'&&!session)render();
+}
+async function acceptMusicFile(kind,file){
+  if(!file)return;
+  try{
+    if(!/\.mp3$/i.test(file.name)||!file.size||file.size>15*1024*1024)throw new Error('请选用不超过 15MB 的 MP3 文件。');
+    const record=await saveMusic(kind,file);
+    revokeMusic(kind);
+    customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob)};
+    toast(`已保存${kind==='intro'?'开始':'结束'}音乐：${record.name}`);
+  }catch(err){toast(`无法保存音乐：${err.message}。本机文件存储失败时，请尝试用电脑把 Dir_OP.mp3 和 Dir_EP.mp3 放入 assets/audio。`);}
+  if(tab==='practice'&&!session)render();
+}
+async function clearMusicFile(kind){
+  if(musicPreview){musicPreview.pause();musicPreview=null;}
+  try{await removeMusic(kind);revokeMusic(kind);toast('已移除本机音乐，改用随项目发布的 MP3 或原有提示音。');}
+  catch(err){toast('移除音乐失败：'+err.message);}
+  if(tab==='practice'&&!session)render();
+}
+
 
 function save() {
   try {localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); return true;}
@@ -188,7 +246,12 @@ function voiceFineTunePanel() {
     <h3 class="focus-heading">⑤ 发音选择与清晰度微调</h3>
     <p class="subtext">先试听再选音色；中文和英文分别调整，修改后自动保存。优先推荐较慢、自然的读音。</p>
     <div class="action-row tune-presets"><button type="button" class="btn btn-subtle" data-action="voice-preset" data-preset="clear">清晰慢速（推荐）</button><button type="button" class="btn" data-action="voice-preset" data-preset="natural">自然速度</button></div>
-    <label class="field"><span>中文音色</span><select name="zhVoice">${voiceOptions('zh-CN',a.zhVoice)}</select></label>
+    <label class="field"><span>中文音色（${availableVoiceCount('zh-CN')} 种可选）</span><select name="zhVoice">${voiceOptions('zh-CN',a.zhVoice)}</select></label>
+    <p class="setting-help">以下列出 Safari 实际提供的中文声音（含普通话、台湾国语、粤语），不是云端音色库。建议优先选普通话 zh-CN。选择某声线后可直接试听并保存。</p>
+    <details class="voice-gallery-details" open><summary>展开中文音色逐个试听（${availableVoiceCount('zh-CN')} 种）</summary>
+      <div class="voice-gallery">${voiceGallery()}</div>
+    </details>
+    <label class="field"><span>中文试听词语</span><input type="text" id="zhTestText" value="崎岖，震耳欲聋，失魂落魄。" maxlength="80" placeholder="可以输入难读的词进行试听"></label>
     <label class="field"><span>中文语速</span><div class="range-title"><span>0.75—0.85× 建议区间</span><strong id="rateZhValue">${a.rateZh.toFixed(2)} ×</strong></div><input type="range" name="rateZh" min=".55" max="1.2" step=".05" value="${a.rateZh}"></label>
     <label class="field"><span>英语音色</span><select name="enVoice">${voiceOptions('en-US',a.enVoice)}</select></label>
     <label class="field"><span>英语语速</span><div class="range-title"><span>0.70—0.85× 建议区间</span><strong id="rateEnValue">${a.rateEn.toFixed(2)} ×</strong></div><input type="range" name="rateEn" min=".55" max="1.2" step=".05" value="${a.rateEn}"></label>
@@ -203,16 +266,24 @@ function voiceFineTunePanel() {
 }
 function ceremonyPanel() {
   const a=db.settings;
-  return `<section class="setting-panel" id="ceremonyPanel"><h3 class="focus-heading">⑥ 开始与结束提示</h3>
-    <p class="subtext">点击“开始听写”后：原创短音乐 → 语音提示开始 → 自动逐词播报；最后一词写完后：短音乐 → 提示完成。</p>
-    <label class="choice cue-choice"><input type="checkbox" name="introCue" ${a.introCue?'checked':''}>开场音乐 + “现在开始听写”</label>
-    <label class="choice cue-choice"><input type="checkbox" name="outroCue" ${a.outroCue?'checked':''}>结束音乐 + “本次听写已完成”</label>
+  return `<section class="setting-panel" id="ceremonyPanel"><h3 class="focus-heading">⑥ 开始与结束音乐</h3>
+    <p class="subtext"><strong>顺序：先完整播放音乐，再朗读提示语。</strong>开场：Dir_OP.mp3 → “现在开始听写” → 第一个词；收尾：Dir_EP.mp3 → “本次听写已完成”。</p>
+    <label class="choice cue-choice"><input type="checkbox" name="introCue" ${a.introCue?'checked':''}>播放开始音乐和开始语音</label>
+    <div class="music-picker"><div class="music-name"><strong>开始音乐 · Dir_OP.mp3</strong><small>${esc(musicLabel('intro'))}</small></div>
+      <label class="btn btn-small" for="introMusicFile">选择 MP3 文件<input class="visually-hidden-file" id="introMusicFile" type="file" accept="audio/mpeg,.mp3"></label>
+      <button type="button" class="btn btn-small" data-action="test-music" data-kind="intro">▶ 试听开始音乐</button>
+      ${customMusic.intro?'<button type="button" class="btn btn-small btn-subtle" data-action="clear-music" data-kind="intro">移除本机音乐</button>':''}</div>
+    <label class="choice cue-choice"><input type="checkbox" name="outroCue" ${a.outroCue?'checked':''}>播放结束音乐和完成语音</label>
+    <div class="music-picker"><div class="music-name"><strong>结束音乐 · Dir_EP.mp3</strong><small>${esc(musicLabel('outro'))}</small></div>
+      <label class="btn btn-small" for="outroMusicFile">选择 MP3 文件<input class="visually-hidden-file" id="outroMusicFile" type="file" accept="audio/mpeg,.mp3"></label>
+      <button type="button" class="btn btn-small" data-action="test-music" data-kind="outro">▶ 试听结束音乐</button>
+      ${customMusic.outro?'<button type="button" class="btn btn-small btn-subtle" data-action="clear-music" data-kind="outro">移除本机音乐</button>':''}</div>
     <div class="range-title"><span>提示音乐音量</span><strong id="jingleVolumeValue">${Math.round(a.jingleVolume*100)}%</strong></div>
     <input aria-label="提示音乐音量" type="range" name="jingleVolume" min="0" max=".8" step=".05" value="${a.jingleVolume}">
-    <button type="button" class="btn btn-small" data-action="test-cue">♫ 试听提示音乐</button>
-    <div class="setting-help">音乐为程序内生成的简短原创提示音，不需要联网或加载外部音乐文件。首次使用请点击页面按钮授权声音。</div>
+    <p class="setting-help">手机选入的 MP3 会尝试保存在当前设备中，换手机需重新选择。也可由电脑把真实 Dir_OP.mp3、Dir_EP.mp3 上传到 GitHub 仓库的 assets/audio/ 目录，让所有设备自动使用。当前版本没有内置你尚未上传的那两个文件。</p>
   </section>`;
 }
+
 function renderPractice() {
   if(session) return renderPlayer();
   const current=defaultSource();
@@ -244,11 +315,35 @@ function renderPlayer(){
   <div class="action-row"><button class="btn" data-action="replay-word" ${completed?'disabled':''}>↻ 重听当前词</button><button class="btn" data-action="toggle-reveal" ${completed?'disabled':''}>${s.revealed?'隐藏词语':'显示词语'}</button>${completed?'<button class="btn btn-primary" data-action="restart-play">再来一轮</button>':''}</div>
   <div class="small-note">“暂停”会取消正在朗读的一小段，“继续”将重新朗读该段，以免漏词；上一词/下一词按词跳转。${completed?'可返回词库重新组合练习。':''}</div>`;
 }
-function voiceOptions(lang, chosen) {
-  if (!('speechSynthesis' in window)) return '<option value="">当前浏览器不支持语音</option>';
-  const voices=speechSynthesis.getVoices().filter(v=>lang==='zh-CN'?v.lang.toLowerCase().startsWith('zh'):v.lang.toLowerCase().startsWith('en'));
-  return `<option value="">系统自动选择</option>${voices.map(v=>`<option value="${esc(v.voiceURI)}" ${v.voiceURI===chosen?'selected':''}>${esc(v.name)} (${esc(v.lang)})${v.localService?' · 本机':''}</option>`).join('')}`;
+function voicesFor(lang){
+  if(!('speechSynthesis' in window))return [];
+  const prefix=lang==='zh-CN'?'zh':'en';
+  return speechSynthesis.getVoices().filter(v=>v.lang.toLowerCase().startsWith(prefix))
+    .sort((a,b)=>{
+      const target=lang.toLowerCase();
+      const aRank=a.lang.toLowerCase()===target?0:1;
+      const bRank=b.lang.toLowerCase()===target?0:1;
+      return aRank-bRank || a.name.localeCompare(b.name);
+    });
 }
+function availableVoiceCount(lang){return voicesFor(lang).length;}
+function voiceGallery(){
+  const voices=voicesFor('zh-CN');
+  if(!voices.length)return '<p class="setting-help">当前浏览器尚未报告中文音色。点下方“刷新音色列表”或在 Safari 中重开页面。</p>';
+  return voices.map((v,i)=>{
+    const chosen=v.voiceURI===db.settings.zhVoice;
+    const dialect=v.lang.toLowerCase().startsWith('zh-hk')?'粤语':v.lang.toLowerCase().startsWith('zh-tw')?'台湾国语':'普通话';
+    return `<div class="voice-gallery-item"><div class="voice-gallery-name"><strong>${i+1}. ${esc(v.name)}</strong><small>${esc(v.lang)} · ${dialect}${chosen?' · 已选':''}</small></div><button type="button" class="btn btn-small" data-action="audition-voice" data-voice="${esc(v.voiceURI)}">试听</button><button type="button" class="btn btn-small ${chosen?'btn-subtle':''}" data-action="pick-voice" data-voice="${esc(v.voiceURI)}">${chosen?'已选择':'选用'}</button></div>`;
+  }).join('');
+}
+function voiceOptions(lang,chosen){
+  if(!('speechSynthesis' in window))return '<option value="">当前浏览器不支持语音</option>';
+  const voices=voicesFor(lang);
+  const unknown=chosen&&!voices.some(v=>v.voiceURI===chosen)?`<option value="${esc(chosen)}" selected disabled>原选音色当前不可用，请重新选择</option>`:'';
+  const options=voices.map((v,i)=>`<option value="${esc(v.voiceURI)}" ${v.voiceURI===chosen?'selected':''}>${i+1}. ${esc(v.name)} · ${esc(v.lang)}${v.localService?' · 本机':''}</option>`).join('');
+  return `<option value="">系统自动选择</option>${unknown}${options}`;
+}
+
 function updatePanelHtml(){
   const ready=updateState.latest && isNewerVersion(updateState.latest,APP_VERSION);
   const label=updateState.message || '尚未检查更新';
@@ -576,7 +671,7 @@ function beginPlayback() {
   const words=arrangeWords(collectWords(db,sourceToUse,allSelectedRefs()),db.settings);
   if(!words.length){toast('当前来源没有词语，请先添加或勾选。');return;}
   stopPlayback(false);
-  session={words,steps:buildSessionSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse)};
+  session={words,steps:buildSessionSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse),musicPlayer:new Audio()};
   // Start audio context from the actual tap; on iPhone user interaction is required.
   if(db.settings.introCue || db.settings.outroCue) ensureAudioContext();
   render();
@@ -584,6 +679,10 @@ function beginPlayback() {
 }
 function cancelCue(s){
   if(!s) return;
+  if(s.musicPlayer){
+    s.musicPlayer.onended=null;s.musicPlayer.onerror=null;
+    try{s.musicPlayer.pause();s.musicPlayer.currentTime=0;}catch{}
+  }
   for(const node of s.cueNodes||[])try{node.stop()}catch{}
   s.cueNodes=[];
 }
@@ -609,16 +708,15 @@ function ensureAudioContext(){
     return audioContext;
   } catch(err){console.warn('提示音不可用',err);return null;}
 }
-function playCue(s,kind,onDone){
+function playOriginalCue(s,kind,onDone){
   const ctx=ensureAudioContext();
   const notes=kind==='intro'?[523.25,659.25,783.99,1046.50]:[783.99,659.25,587.33,523.25];
-  const volume=Math.max(0, Math.min(.8, db.settings.jingleVolume ?? .38));
+  const volume=Math.max(0,Math.min(.8,db.settings.jingleVolume??.38));
   if(ctx && volume>0){
-    const t0=ctx.currentTime+.035;
-    s.cueNodes=[];
+    const t0=ctx.currentTime+.035;s.cueNodes=[];
     for(let i=0;i<notes.length;i++){
       const start=t0+i*.275;
-      const osc=ctx.createOscillator();const amp=ctx.createGain();
+      const osc=ctx.createOscillator(),amp=ctx.createGain();
       osc.type='sine';osc.frequency.setValueAtTime(notes[i],start);
       amp.gain.setValueAtTime(.0001,start);
       amp.gain.exponentialRampToValueAtTime(Math.max(.001,volume*.22),start+.027);
@@ -627,16 +725,46 @@ function playCue(s,kind,onDone){
       s.cueNodes.push(osc);
     }
   }
-  // Use a session timer so pause, next, and stop cancel the cue consistently.
   s.timer=setTimeout(()=>{s.cueNodes=[];onDone();},1300);
 }
-function speakOnce(text,lang,onDone,onFailure) {
+/** Play MP3 fully, then advance to speech; no hardcoded audio length. */
+function playCue(s,kind,onDone){
+  const clip=currentMusic(kind);
+  if(!clip?.url){playOriginalCue(s,kind,onDone);return;}
+  const player=s.musicPlayer || (s.musicPlayer=new Audio());
+  player.onended=null;player.onerror=null;
+  player.src=clip.url;
+  player.preload='auto';
+  // Some iOS models ignore per-element volume; device volume remains the fallback.
+  player.volume=Math.min(1,Math.max(0,db.settings.jingleVolume??.38));
+  let finished=false;
+  const finish=()=>{
+    if(finished)return;finished=true;
+    player.onended=null;player.onerror=null;
+    onDone();
+  };
+  const fallback=()=>{
+    if(finished)return;finished=true;
+    player.onended=null;player.onerror=null;
+    try{player.pause();}catch{}
+    toast(`${kind==='intro'?'开始':'结束'} MP3 播放失败，已改用短提示音。`);
+    playOriginalCue(s,kind,onDone);
+  };
+  player.onended=finish;
+  player.onerror=fallback;
+  try{
+    const result=player.play();
+    if(result?.catch)void result.catch(fallback);
+  }catch(err){fallback();}
+}
+
+function speakOnce(text,lang,onDone,onFailure,voiceOverride=null) {
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang=lang;
   utterance.rate=lang==='en-US'?db.settings.rateEn:db.settings.rateZh;
   utterance.pitch=lang==='en-US'?db.settings.pitchEn:db.settings.pitchZh;
   utterance.volume=db.settings.voiceVolume;
-  const v=chooseVoice(lang);if(v)utterance.voice=v;
+  const v=voiceOverride||chooseVoice(lang);if(v)utterance.voice=v;
   utterance.onend=onDone;
   utterance.onerror=onFailure;
   window.speechSynthesis.speak(utterance);
@@ -975,11 +1103,43 @@ function handleAction(button) {
       save();render();toast(clear?'已使用清晰慢速预设。':'已使用自然速度预设。');break;
     }
     case 'refresh-voices':{
-      if('speechSynthesis' in window){speechSynthesis.getVoices();render();toast('已刷新可用音色；只有本机提供的声音会显示。');}break;
+      if('speechSynthesis' in window){speechSynthesis.getVoices();render();toast('已刷新可用音色；只有 Safari 提供的声音会显示。');}break;
+    }
+    case 'pick-voice':{
+      const voice=voicesFor('zh-CN').find(v=>v.voiceURI===button.dataset.voice);
+      if(!voice){toast('这个音色已不可用，请刷新列表。');break;}
+      db.settings.zhVoice=voice.voiceURI;save();render();toast(`已选用：${voice.name}`);break;
+    }
+    case 'audition-voice':{
+      if(!('speechSynthesis' in window)){toast('此浏览器不支持朗读。');break;}
+      const voice=voicesFor('zh-CN').find(v=>v.voiceURI===button.dataset.voice);
+      if(!voice){toast('这个音色已不可用，请刷新列表。');break;}
+      const sample=$('#zhTestText')?.value.trim()||'崎岖，震耳欲聋，失魂落魄。';
+      window.speechSynthesis.cancel();
+      speakOnce(sample,voice.lang,()=>{},()=>toast('试听失败，请尝试其他音色。'),voice);
+      break;
+    }
+    case 'test-music':{
+      const kind=button.dataset.kind==='outro'?'outro':'intro';
+      if(musicPreview){musicPreview.pause();musicPreview=null;}
+      const clip=currentMusic(kind);
+      if(clip?.url){
+        const player=new Audio(clip.url);musicPreview=player;
+        player.volume=Math.min(1,Math.max(0,db.settings.jingleVolume??.38));
+        player.onended=()=>{if(musicPreview===player)musicPreview=null;};
+        player.onerror=()=>toast('MP3 试听失败，请重新选择文件。');
+        void player.play().catch(()=>toast('试听被浏览器阻止，请再次点按试听。'));
+      }else{
+        const temp={timer:0,cueNodes:[],musicPlayer:new Audio()};ensureAudioContext();playOriginalCue(temp,kind,()=>{});
+      }
+      break;
+    }
+    case 'clear-music':{
+      void clearMusicFile(button.dataset.kind==='outro'?'outro':'intro');break;
     }
     case 'test-cue':{
-      const temp={timer:0,cueNodes:[]};ensureAudioContext();playCue(temp,'intro',()=>{});
-      toast('正在试听开场提示音乐。');break;
+      const temp={timer:0,cueNodes:[],musicPlayer:new Audio()};ensureAudioContext();playCue(temp,'intro',()=>{});
+      break;
     }
     case 'start-play':beginPlayback();break;
     case 'stop-play':stopPlayback();break;
@@ -992,7 +1152,7 @@ function handleAction(button) {
     case 'test-voice':{
       if(!('speechSynthesis' in window)){toast('当前浏览器没有语音能力。');break;}
       const lang=button.dataset.lang;
-      speechSynthesis.cancel();speakOnce(lang==='en-US'?'Welcome to the dictation practice.':'你好，现在开始中文听写。',lang,()=>{},()=>toast('试听失败，请尝试系统自动音色。'));break;
+      speechSynthesis.cancel();speakOnce(lang==='en-US'?'Welcome to the dictation practice.':($('#zhTestText')?.value.trim()||'崎岖，震耳欲聋，失魂落魄。'),lang,()=>{},()=>toast('试听失败，请尝试系统自动音色。'));break;
     }
     case 'add-demo':addDemo();break;
     case 'export-backup':downloadBackup();break;
@@ -1031,6 +1191,10 @@ document.addEventListener('change',event=>{
     render();return;
   }
   if(target.id==='backupFile'){importBackup(target.files?.[0]);target.value='';return;}
+  if(target.id==='introMusicFile'||target.id==='outroMusicFile'){
+    const kind=target.id==='introMusicFile'?'intro':'outro';
+    void acceptMusicFile(kind,target.files?.[0]);target.value='';return;
+  }
   const setting=target.name;
   if(Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS,setting)){
     if(['skipDuplicates','hideAnswers','introCue','outroCue'].includes(setting))db.settings[setting]=target.checked;
@@ -1062,3 +1226,5 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).catch(error=>console.warn('Service Worker 注册失败',error));
 }
 render();
+void loadUserMusic();
+void checkBundledMusic();
