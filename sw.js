@@ -1,6 +1,6 @@
 // Versioned application shell; the user's word library remains exclusively in localStorage.
-const CACHE = 'dictation-buddy-v0.3.2';
-const SHELL = ['./', './index.html', './styles.css', './app.js', './core.js', './ocr-utils.js', './version-utils.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png'];
+const CACHE = 'dictation-buddy-v0.3.5';
+const SHELL = ['./', './index.html', './manual.html', './styles.css?v=0.3.5', './app.js?v=0.3.5', './core.js', './ocr-utils.js', './version-utils.js', './manifest.webmanifest', './assets/icon.svg', './assets/icon-192.png', './assets/icon-512.png'];
 self.addEventListener('install', event => {
   event.waitUntil((async()=>{
     await (await caches.open(CACHE)).addAll(SHELL);
@@ -26,7 +26,7 @@ self.addEventListener('fetch', event => {
     event.respondWith(fetch(req,{cache:'no-store'}));return;
   }
   if(req.mode==='navigate'){
-    event.respondWith(fetch(req).then(res=>{if(res.ok){const clone=res.clone();caches.open(CACHE).then(cache=>cache.put('./index.html',clone));}return res;}).catch(()=>caches.match('./index.html')));
+    event.respondWith(fetch(req).then(res=>{if(res.ok){const clone=res.clone();caches.open(CACHE).then(cache=>cache.put(url.pathname.endsWith('/manual.html')?'./manual.html':'./index.html',clone));}return res;}).catch(()=>caches.match(url.pathname.endsWith('/manual.html')?'./manual.html':'./index.html')));
     return;
   }
   event.respondWith(caches.match(req).then(cached=>cached||fetch(req).then(res=>{

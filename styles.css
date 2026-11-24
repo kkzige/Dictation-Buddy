@@ -54,3 +54,20 @@ main{padding:23px 20px 30px}.page-header{display:flex;align-items:flex-start;jus
 .crop-result-preview{max-width:100%;max-height:220px;object-fit:contain;border:1px solid #e1e7ed;border-radius:9px;background:#fff;display:block;margin:10px auto 0}
 .update-status{background:#f3f7fc;color:#426889;border-radius:12px;padding:11px 12px;font-size:13px;line-height:1.5;margin:13px 0}
 @media(max-height:680px){.crop-result-preview{max-height:145px}.crop-stage img{max-height:250px}}
+
+/* v0.3.3: clear handwritten OCR availability and connection diagnostics. */
+.ocr-service-alert{border:1px solid #e8d6ae;background:#fff8ea;color:#7d5b2c;border-radius:12px;padding:12px 13px;font-size:13px;line-height:1.6;margin:8px 0 13px}
+#ocrAvailability{font-size:12px;margin:8px 0}#ocrConnectionStatus{overflow-wrap:anywhere}
+
+/* v0.3.4: direct, always-available manual entry without a dependent popup. */
+.top-manual-link{display:inline-flex;align-items:center;justify-content:center;min-height:40px;min-width:80px;padding:6px 9px;white-space:nowrap;background:#e9f3fc;border:1px solid #c9dfef;border-radius:11px;color:#285e8d;font-size:12px;font-weight:800;text-decoration:none;flex:none}
+.top-manual-link:focus-visible{outline:3px solid #8bc1eb;outline-offset:2px}
+.import-primary-zone{padding:13px;border:1px solid #bfd8ef;background:#f3f9ff;border-radius:14px;margin:4px 0 14px}
+.import-primary-zone .field{margin-bottom:10px}
+.import-primary-zone .field>span{font-size:15px;color:#315e8b}
+.import-primary-zone textarea{background:#fff!important;min-height:125px}
+.manual-import-tip{color:#436b91;font-size:12px;line-height:1.6;margin-top:3px}
+@media(max-width:420px){.topbar{padding-left:12px;padding-right:12px;gap:7px}.brand-title>span{font-size:17px}.brand-title small{font-size:9px}.brand-icon{width:39px;height:39px}.icon-button{min-width:35px;min-height:39px}.top-manual-link{min-width:76px;padding:5px 7px}}
+
+/* v0.3.5: readable voice tuning, brief musical cues, no obscured controls */
+.tune-presets{margin:8px 0 17px}.tune-presets .btn{white-space:normal;flex:1;min-width:118px}.fine-details{border-top:1px solid #eef1f5;padding:13px 0 1px;margin:15px 0 6px}.fine-details summary{font-size:13px;color:#315e8a;font-weight:750;cursor:pointer;min-height:28px}.fine-details[open] .field{margin-top:14px}.cue-choice{margin:8px 0;min-height:48px}.cue-choice input{width:19px;height:19px}.focus-heading{font-size:15px!important;margin:0 0 12px!important}.setting-panel input[type=range]{width:100%;accent-color:#35699b;min-height:32px}.setting-panel .field select{width:100%}@media(max-width:370px){.tune-presets .btn{font-size:12px;padding:9px 10px}}

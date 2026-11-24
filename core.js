@@ -4,8 +4,14 @@ export const DEFAULT_SETTINGS = Object.freeze({
   repetitions: 2,
   repeatGap: 1.0,
   wordGap: 5.0,
-  rateZh: 0.86,
-  rateEn: 0.84,
+  rateZh: 0.80,
+  rateEn: 0.78,
+  pitchZh: 1.00,
+  pitchEn: 1.00,
+  voiceVolume: 1.00,
+  jingleVolume: 0.38,
+  introCue: true,
+  outroCue: true,
   skipDuplicates: true,
   hideAnswers: true,
   zhVoice: '',
@@ -78,8 +84,14 @@ export function normalizeDb(raw) {
       repetitions: Math.round(clamp(s.repetitions ?? 2, 1, 5)),
       repeatGap: clamp(s.repeatGap ?? 1, 0, 5),
       wordGap: clamp(s.wordGap ?? 5, 1, 30),
-      rateZh: clamp(s.rateZh ?? .86, .55, 1.4),
-      rateEn: clamp(s.rateEn ?? .84, .55, 1.4),
+      rateZh: clamp(s.rateZh ?? .80, .55, 1.4),
+      rateEn: clamp(s.rateEn ?? .78, .55, 1.4),
+      pitchZh: clamp(s.pitchZh ?? 1, .85, 1.15),
+      pitchEn: clamp(s.pitchEn ?? 1, .85, 1.15),
+      voiceVolume: clamp(s.voiceVolume ?? 1, .2, 1),
+      jingleVolume: clamp(s.jingleVolume ?? .38, 0, .8),
+      introCue: s.introCue !== false,
+      outroCue: s.outroCue !== false,
       skipDuplicates: s.skipDuplicates !== false,
       hideAnswers: s.hideAnswers !== false,
       zhVoice: String(s.zhVoice ?? '').slice(0, 200),
@@ -215,6 +227,23 @@ export function buildSteps(words, settings) {
     if (index < words.length - 1) steps.push({type: 'wait', duration: Math.round(clamp(settings.wordGap, 1, 30) * 1000), wordIndex: index});
   }
   return steps;
+}
+
+/** Add two short original musical cues and spoken instructions around unchanged dictation steps. */
+export function buildSessionSteps(words, settings) {
+  const steps = buildSteps(words, settings);
+  if (!words.length) return [];
+  const intro = settings.introCue !== false ? [
+    {type:'jingle', phase:'intro', wordIndex:0, kind:'intro'},
+    {type:'say', phase:'intro', wordIndex:0, lang:'zh-CN', text:'准备好了吗？现在开始听写。'},
+    {type:'wait', phase:'intro', wordIndex:0, duration:600}
+  ] : [];
+  const outro = settings.outroCue !== false ? [
+    {type:'wait', phase:'outro', wordIndex:words.length-1, duration:600},
+    {type:'jingle', phase:'outro', wordIndex:words.length-1, kind:'outro'},
+    {type:'say', phase:'outro', wordIndex:words.length-1, lang:'zh-CN', text:'本次听写已完成。辛苦了！'}
+  ] : [];
+  return [...intro, ...steps, ...outro];
 }
 
 export function indicesToPrompt(marks) {

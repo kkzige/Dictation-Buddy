@@ -1,13 +1,13 @@
 import {
   DEFAULT_SETTINGS, uid, parseEntries, normalizeDb, refKey, collectWords,
-  getItemsFromRefs, arrangeWords, buildSteps, languageName, graphemes,
+  getItemsFromRefs, arrangeWords, buildSessionSteps, languageName, graphemes,
   isChineseCharacter, indicesToPrompt, clamp, prepareBankEntries, normalizeTermKey
 } from './core.js';
-import {validateOcrEndpoint, extractOcrLines, clampCrop} from './ocr-utils.js';
+import {clampCrop} from './ocr-utils.js';
 import {isNewerVersion} from './version-utils.js';
 
 const STORAGE_KEY = 'dictation-buddy-v0.1-data'; // Keep unchanged across program updates
-const APP_VERSION = '0.3.2';
+const APP_VERSION = '0.3.5';
 const OCR_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; // OCR only, fetched on demand
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -37,12 +37,11 @@ let confirmedCropBlob = null;
 let confirmedCropUrl = '';
 let updateState = {latest:null, notes:'', checked:false, checking:false, applying:false, message:'尚未检查更新'};
 let applyingUpdate = false;
-let ocrKind = 'handwriting'; // deliberate choice: never silently use print OCR for handwriting
-let ocrPin = ''; // never persisted or exported
 
 let ocrBusy = false;
 let ocrLoading = null;
 let toastTimer = 0;
+let audioContext = null;
 
 function save() {
   try {localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); return true;}
@@ -183,6 +182,37 @@ function settingsMini() {
   <div class="action-row"><label class="choice" style="flex:1"><input type="checkbox" name="skipDuplicates" ${db.settings.skipDuplicates?'checked':''}>合并重复词语</label><label class="choice" style="flex:1"><input type="checkbox" name="hideAnswers" ${db.settings.hideAnswers?'checked':''}>默认隐藏答案</label></div>
   </section>`;
 }
+function voiceFineTunePanel() {
+  const a=db.settings;
+  return `<section class="setting-panel" id="voiceTunePanel">
+    <h3 class="focus-heading">⑤ 发音选择与清晰度微调</h3>
+    <p class="subtext">先试听再选音色；中文和英文分别调整，修改后自动保存。优先推荐较慢、自然的读音。</p>
+    <div class="action-row tune-presets"><button type="button" class="btn btn-subtle" data-action="voice-preset" data-preset="clear">清晰慢速（推荐）</button><button type="button" class="btn" data-action="voice-preset" data-preset="natural">自然速度</button></div>
+    <label class="field"><span>中文音色</span><select name="zhVoice">${voiceOptions('zh-CN',a.zhVoice)}</select></label>
+    <label class="field"><span>中文语速</span><div class="range-title"><span>0.75—0.85× 建议区间</span><strong id="rateZhValue">${a.rateZh.toFixed(2)} ×</strong></div><input type="range" name="rateZh" min=".55" max="1.2" step=".05" value="${a.rateZh}"></label>
+    <label class="field"><span>英语音色</span><select name="enVoice">${voiceOptions('en-US',a.enVoice)}</select></label>
+    <label class="field"><span>英语语速</span><div class="range-title"><span>0.70—0.85× 建议区间</span><strong id="rateEnValue">${a.rateEn.toFixed(2)} ×</strong></div><input type="range" name="rateEn" min=".55" max="1.2" step=".05" value="${a.rateEn}"></label>
+    <div class="action-row"><button class="btn btn-subtle" data-action="test-voice" data-lang="zh-CN">▶ 试听中文</button><button class="btn btn-subtle" data-action="test-voice" data-lang="en-US">▶ 试听英文</button><button class="btn" data-action="refresh-voices">刷新音色列表</button></div>
+    <details class="fine-details"><summary>微调音高、音量</summary>
+      <label class="field"><span>中文音高</span><div class="range-title"><span>建议接近 1.00</span><strong id="pitchZhValue">${a.pitchZh.toFixed(2)}</strong></div><input type="range" name="pitchZh" min=".85" max="1.15" step=".05" value="${a.pitchZh}"></label>
+      <label class="field"><span>英语音高</span><div class="range-title"><span>建议接近 1.00</span><strong id="pitchEnValue">${a.pitchEn.toFixed(2)}</strong></div><input type="range" name="pitchEn" min=".85" max="1.15" step=".05" value="${a.pitchEn}"></label>
+      <label class="field"><span>语音音量</span><div class="range-title"><span>语音音量</span><strong id="voiceVolumeValue">${Math.round(a.voiceVolume*100)}%</strong></div><input type="range" name="voiceVolume" min=".2" max="1" step=".05" value="${a.voiceVolume}"></label>
+    </details>
+    <p class="setting-help">音色取自当前设备。iPhone 未安装的音色不会出现在列表中；音高和速度能调节，但不能把普通音色变成专业录音。</p>
+  </section>`;
+}
+function ceremonyPanel() {
+  const a=db.settings;
+  return `<section class="setting-panel" id="ceremonyPanel"><h3 class="focus-heading">⑥ 开始与结束提示</h3>
+    <p class="subtext">点击“开始听写”后：原创短音乐 → 语音提示开始 → 自动逐词播报；最后一词写完后：短音乐 → 提示完成。</p>
+    <label class="choice cue-choice"><input type="checkbox" name="introCue" ${a.introCue?'checked':''}>开场音乐 + “现在开始听写”</label>
+    <label class="choice cue-choice"><input type="checkbox" name="outroCue" ${a.outroCue?'checked':''}>结束音乐 + “本次听写已完成”</label>
+    <div class="range-title"><span>提示音乐音量</span><strong id="jingleVolumeValue">${Math.round(a.jingleVolume*100)}%</strong></div>
+    <input aria-label="提示音乐音量" type="range" name="jingleVolume" min="0" max=".8" step=".05" value="${a.jingleVolume}">
+    <button type="button" class="btn btn-small" data-action="test-cue">♫ 试听提示音乐</button>
+    <div class="setting-help">音乐为程序内生成的简短原创提示音，不需要联网或加载外部音乐文件。首次使用请点击页面按钮授权声音。</div>
+  </section>`;
+}
 function renderPractice() {
   if(session) return renderPlayer();
   const current=defaultSource();
@@ -191,7 +221,8 @@ function renderPractice() {
   if(!db.banks.length) return html+`<div class="empty"><div class="empty-symbol">◉</div><h3>没有可播报的词语</h3><p>请先创建一份词库。</p><button class="btn btn-primary" data-action="open-import">导入词语</button></div>`;
   html+=`<section class="setting-panel"><h3>听写内容</h3><label class="field"><span>选择来源</span><select id="practiceSource">${sourceOptions(current)}</select><small class="hint">${words.length} 个词语准备就绪；混合词库时会为每个词选择对应语言。</small></label></section>`;
   html+=settingsMini();
-  html+=`<button class="btn btn-primary btn-wide" style="min-height:56px;font-size:16px" data-action="start-play" ${words.length?'':'disabled'}>▶ 开始播报 ${words.length} 个词语</button><div class="small-note">首次播放需要点击按钮授权声音。请把 iPhone 保持亮屏、网页保持前台，语音效果受系统可用音色影响。</div>`;
+  html+=voiceFineTunePanel()+ceremonyPanel();
+  html+=`<button class="btn btn-primary btn-wide" style="min-height:56px;font-size:16px" data-action="start-play" ${words.length?'':'disabled'}>▶ 开始播报 ${words.length} 个词语</button><div class="small-note">点击开始后先播放提示音并宣布开始。首次播放需要点击按钮授权声音。请把 iPhone 保持亮屏、网页保持前台，语音效果受系统可用音色影响。</div>`;
   return html;
 }
 function currentWordIndex(s) {
@@ -204,9 +235,9 @@ function renderPlayer(){
   const idx=currentWordIndex(s);
   const item=s.words[idx];
   const step=s.steps[Math.min(s.stepIndex,s.steps.length-1)];
-  const meta=completed?'本轮听写已完成':step?.phase==='pinyin'?'正在提示写拼音':step?.phase==='word'?`本词第 ${step.rep} / ${step.reps} 遍`:'等待下一次播报';
-  const title=completed?'全部完成':s.revealed?esc(item?.text):Array.from(item?.text??'').map(ch=>/\s/.test(ch)?'&nbsp;':'●').join('');
-  const progress=completed?100:Math.round((idx/s.words.length)*100);
+  const meta=completed?'本轮听写已完成':step?.phase==='intro'?'开场提示 · 即将开始':step?.phase==='outro'?'结束提示 · 即将完成':step?.phase==='pinyin'?'正在提示写拼音':step?.phase==='word'?`本词第 ${step.rep} / ${step.reps} 遍`:'等待下一次播报';
+  const title=completed?'全部完成':step?.phase==='intro'?'准备开始':step?.phase==='outro'?'收尾提示':s.revealed?esc(item?.text):Array.from(item?.text??'').map(ch=>/\s/.test(ch)?'&nbsp;':'●').join('');
+  const progress=completed?100:step?.phase==='outro'?99:Math.round((idx/s.words.length)*100);
   return `<div class="page-header"><div><div class="eyebrow">NOW PLAYING</div><h1 class="page-title">${completed?'听写结束':'正在听写'}</h1><p class="page-description">${esc(s.sourceName)}</p></div><button class="btn btn-small" data-action="stop-play">结束</button></div>
   <div class="play-card"><div class="play-kicker">${completed?'完成':'第 '+(idx+1)+' / '+s.words.length+' 个词语'} · ${item?languageName(item.lang):''}</div><div class="play-title">${title}</div><div class="play-meta">${meta}</div><div class="tiny-progress"><div style="width:${progress}%"></div></div>
   <div class="play-actions"><button class="btn" data-action="prev-word" ${completed?'disabled':''}>↶ 上一个</button><button class="btn btn-primary" data-action="toggle-pause">${completed?'✓ 已完成':s.paused?'▶ 继续':'Ⅱ 暂停'}</button><button class="btn" data-action="next-word" ${completed?'disabled':''}>下一个 ↷</button></div><div class="play-footer"><span>${completed?'':(item?.marks.length?'本词含拼音提示':'请认真听写')}</span><span>${completed?s.words.length:idx+1} / ${s.words.length}</span></div></div>
@@ -308,21 +339,11 @@ async function applyAvailableUpdate(){
 function renderSettings() {
   return `<div class="page-header"><div><div class="eyebrow">PREFERENCES & DATA</div><h1 class="page-title">设置与备份</h1><p class="page-description">调整声音风格、保护词库，方便长期使用。</p></div></div>
   <section class="setting-panel" id="appUpdatePanel">${updatePanelHtml()}</section>
-  <section class="setting-panel"><h3>语音音色与语速</h3>
-  <label class="field"><span>中文音色</span><select name="zhVoice">${voiceOptions('zh-CN',db.settings.zhVoice)}</select></label>
-  <label class="field"><span>英语音色</span><select name="enVoice">${voiceOptions('en-US',db.settings.enVoice)}</select></label>
-  <label class="field"><span>中文语速</span><div class="range-title"><span>建议略慢</span><strong id="rateZhValue">${db.settings.rateZh.toFixed(2)} ×</strong></div><input type="range" name="rateZh" min=".55" max="1.4" step=".05" value="${db.settings.rateZh}"></label>
-  <label class="field"><span>英语语速</span><div class="range-title"><span>可按孩子听写水平调整</span><strong id="rateEnValue">${db.settings.rateEn.toFixed(2)} ×</strong></div><input type="range" name="rateEn" min=".55" max="1.4" step=".05" value="${db.settings.rateEn}"></label>
-  <div class="action-row"><button class="btn btn-subtle" data-action="test-voice" data-lang="zh-CN">试听中文</button><button class="btn btn-subtle" data-action="test-voice" data-lang="en-US">试听英文</button></div>
-  <div class="setting-help">音色来自本机 Safari 可用的系统声音，某些 iPhone 可能不会显示完整音色列表。</div></section>
+  <section class="setting-panel"><h3>发音设置</h3><p class="subtext">中文、英文的音色、语速、音高、音量，以及开场和结束音乐，现在直接放在「听写」页面开始按钮上方，方便边试听边调整。</p><button type="button" class="btn btn-subtle" data-action="go-practice">去听写页调整</button></section>
   <section class="setting-panel"><h3>词库数据</h3><p class="subtext">当前 ${db.banks.length} 份词库，${totalWords()} 个词语，${db.groups.length} 个组合。数据只存当前浏览器，不会自动同步到其他设备。</p>
   <div class="action-row"><button class="btn btn-primary" data-action="export-backup">导出 JSON 备份</button><label class="btn" for="backupFile">导入 JSON 备份</label><input type="file" id="backupFile" accept="application/json,.json" class="visually-hidden-file"></div>
   <div class="small-note warning-note">Safari 清理网站数据、删除主屏幕应用，或更换设备时，词库可能丢失。建议每周导出备份。导入备份会替换当前所有词库与组合。</div></section>
-  <section class="setting-panel"><h3>手写识别服务（需配置一次）</h3><p class="subtext">手写体改用百度智能云的专用手写 OCR。GitHub Pages 不能安全保管密钥，因此需要另外部署 Cloudflare Worker 并配置服务端密钥。</p>
-  <label class="field"><span>Worker 识别接口地址</span><input name="ocrEndpoint" type="url" placeholder="https://你的服务.workers.dev/ocr" value="${esc(db.settings.ocrEndpoint)}" autocomplete="off"><small class="hint">仅保存公开接口地址，不保存服务商密钥。</small></label>
-  <label class="field"><span>访问口令（本次打开应用有效）</span><input id="ocrPin" type="password" placeholder="Worker 中设置的 OCR_ACCESS_PIN" autocomplete="off" value="${esc(ocrPin)}"><small class="hint">口令只放在内存中，不写入词库备份或本地存储。退出或刷新后可能需重新输入。</small></label>
-  <p class="subtext">使用云识别时，只有裁剪后的选区图片会发送给 Worker 和百度 OCR；印刷体本机识别不会上传照片。涉及未成年人信息时请避免拍入姓名、学校等个人内容。</p></section>
-  <section class="setting-panel"><h3>离线与播报说明</h3><p class="subtext">手动录入、词库与基础播报不依赖自建后端；云端手写 OCR 需要网络与有效的服务配置。印刷体本机识别首次使用需要联网加载语言模型。</p><p class="subtext">iOS 锁屏、切出应用或语音引擎被系统中断，可能停止播报；建议亮屏使用。</p></section>
+  <section class="setting-panel"><h3>离线与播报说明</h3><p class="subtext">手动录入、词库与基础播报无需云端账号；印刷体本机 OCR 首次使用需要联网加载语言模型。手写体请使用 iPhone「照片」实况文本复制或手动输入。</p><p class="subtext">iOS 锁屏、切出应用或语音引擎被系统中断，可能停止播报；建议亮屏使用。</p></section>
   <section class="setting-panel"><h3>快速试用</h3><div class="action-row"><button class="btn" data-action="add-demo">新增示例词库</button><button class="btn btn-danger" data-action="clear-everything">清空全部数据</button></div></section>`;
 }
 
@@ -331,7 +352,6 @@ function openImport(restore = false, targetBankId = null, preferredMode = 'manua
     importTargetBankId = targetBankId;
     importDraft = null;
     importMode = preferredMode === 'photo' ? 'photo' : 'manual';
-    ocrKind = 'handwriting';
   }
   const targetBank = importTargetBankId ? getBank(importTargetBankId) : null;
   if(importTargetBankId && !targetBank) {toast('目标词库不存在，请返回词库列表重新选择。');return;}
@@ -344,15 +364,16 @@ function openImport(restore = false, targetBankId = null, preferredMode = 'manua
     <button type="button" class="import-method ${importMode==='manual'?'active':''}" data-action="import-mode" data-method="manual" aria-pressed="${importMode==='manual'}"><span class="method-symbol">⌨</span><span>手动输入<small>单词、词组或批量粘贴</small></span></button>
     <button type="button" class="import-method ${importMode==='photo'?'active':''}" data-action="import-mode" data-method="photo" aria-pressed="${importMode==='photo'}"><span class="method-symbol">▧</span><span>拍照识别<small>拍课本、相册选图</small></span></button>
   </div></div>
-  <section id="manualImportPanel" ${importMode==='manual'?'':'hidden'}><div class="small-note">中文默认按空格、换行和标点自动切分；英文默认保留词组内空格（例如 look after）。</div></section>
+  <section class="import-primary-zone" id="manualImportPanel"><label class="field"><span>⌨ ${importMode==='manual'?'直接输入 / 粘贴词语':'照片识别结果 / 手动补充'}</span><textarea id="importText" rows="5" placeholder="例如：苹果 香蕉 葡萄\n或者每行一个词语">${esc(old?.entries.map(x=>x.text).join('\n') || '')}</textarea></label><div class="manual-import-tip">中文空格、换行、逗号自动切分；英文短语保留空格。输入后点击下面的「核对并保存」。</div></section>
   <section id="photoImportPanel" ${importMode==='photo'?'':'hidden'}>
     <div class="field"><span>拍照或从相册选择图片</span><div class="action-row"><label class="btn btn-subtle" for="cameraFile">📷 拍照</label><input type="file" id="cameraFile" accept="image/*" capture="environment" class="visually-hidden-file"><label class="btn" for="galleryFile">▧ 相册选取</label><input type="file" id="galleryFile" accept="image/*" class="visually-hidden-file"></div></div>
-    <div class="field"><span>识别类型</span><div class="option-grid"><label class="choice"><input type="radio" name="ocrKind" value="handwriting" ${ocrKind==='handwriting'?'checked':''}>✍️ 手写体（专用云识别）</label><label class="choice"><input type="radio" name="ocrKind" value="printed" ${ocrKind==='printed'?'checked':''}>▤ 印刷体（本机识别）</label></div></div>
+    <div class="ocr-service-alert">本版不需要注册任何云服务。照片框选后可尝试<strong>印刷体识别</strong>；<strong>手写体暂不保证识别</strong>。手写照片请优先通过 iPhone「照片」的实况文本复制，再粘贴到上方输入框。</div>
+    <div class="action-row"><button type="button" class="btn" data-action="paste-live-text">粘贴 iPhone 实况文本</button></div>
+    <div class="hint">在 iPhone「照片」中长按文字并复制，再返回此处粘贴；也可直接手动录入。实况文本不保证能正确读取所有手写字。</div>
     <div id="photoHolder"></div>
-    <div id="ocrStatus" class="ocr-status" role="status">先拍照或选图，拖动蓝框选择文字；确认选区后才能识别。手写体需要配置云端接口。</div>
+    <div id="ocrStatus" class="ocr-status" role="status">先拍照或选图，拖动蓝框选择印刷文字，再确认选区。无需云端服务。</div>
     <small class="hint">识别结果需要人工核对；不要把姓名等隐私信息放进框选区域。</small>
   </section>
-  <label class="field"><span>${importMode==='manual'?'输入或粘贴词语':'识别结果 / 手动补充词语'}</span><textarea id="importText" rows="7" placeholder="每行一个词语，例如：\n崎岖\n拥抱\n坚韧">${esc(old?.entries.map(x=>x.text).join('\n') || '')}</textarea><small class="hint">单个词语直接输入一行即可；多项内容可批量粘贴。下一步逐条检查和标记拼音字。</small></label>
   <label class="field"><span>拆分方式</span><select id="importSplit"><option value="auto" selected>自动识别分隔（推荐：中文空格自动切分，英文保留短语）</option><option value="line">严格按行（一个整行作为词语）</option><option value="punct">按换行、逗号、顿号、分号拆分</option><option value="spaces">按空格、换行及标点拆分</option></select></label>
   <div class="small-note" id="importPreview">输入后会显示词语数量和部分预览。</div>
   <button class="btn btn-primary btn-wide" data-action="review-import">下一步 · 核对词语和拼音标记</button>`);
@@ -366,9 +387,11 @@ function setImportMode(mode) {
     const active=btn.dataset.method===importMode;
     btn.classList.toggle('active',active);btn.setAttribute('aria-pressed',String(active));
   });
-  $('#manualImportPanel').hidden=importMode!=='manual';
+  const label=$('#manualImportPanel .field>span');
+  if(label)label.textContent=importMode==='manual'?'⌨ 直接输入 / 粘贴词语':'照片识别结果 / 手动补充';
   $('#photoImportPanel').hidden=importMode!=='photo';
   updateCropActionBar();
+  if(importMode==='manual'){const input=$('#importText');input?.scrollIntoView({block:'center',behavior:'instant'});input?.focus({preventScroll:true});}
 }
 function refreshImportPreview() {
   const raw=$('#importText')?.value ?? '';
@@ -553,11 +576,18 @@ function beginPlayback() {
   const words=arrangeWords(collectWords(db,sourceToUse,allSelectedRefs()),db.settings);
   if(!words.length){toast('当前来源没有词语，请先添加或勾选。');return;}
   stopPlayback(false);
-  session={words,steps:buildSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse)};
+  session={words,steps:buildSessionSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse)};
+  // Start audio context from the actual tap; on iPhone user interaction is required.
+  if(db.settings.introCue || db.settings.outroCue) ensureAudioContext();
   render();
-  executeStep(); // Called directly from a tap, so iOS can unlock speech synthesis.
+  executeStep(); // Called directly from a tap.
 }
-function cancelTimers(s){if(!s)return;clearTimeout(s.timer);clearTimeout(s.watchdog);s.timer=0;s.watchdog=0;}
+function cancelCue(s){
+  if(!s) return;
+  for(const node of s.cueNodes||[])try{node.stop()}catch{}
+  s.cueNodes=[];
+}
+function cancelTimers(s){if(!s)return;clearTimeout(s.timer);clearTimeout(s.watchdog);s.timer=0;s.watchdog=0;cancelCue(s);}
 function stopPlayback(shouldRender=true){
   const s=session;
   if(s){s.playToken++;cancelTimers(s);session=null;}
@@ -571,11 +601,41 @@ function chooseVoice(lang){
   const matching=voices.filter(v=>v.lang.toLowerCase().startsWith(lang==='en-US'?'en':'zh'));
   return matching.find(v=>v.localService && v.lang.toLowerCase()===lang.toLowerCase()) || matching.find(v=>v.localService) || matching[0] || null;
 }
+// Short, original, instrumental cue: generated locally, no copyrighted audio or network file.
+function ensureAudioContext(){
+  try {
+    if(!audioContext){const Class=window.AudioContext||window.webkitAudioContext;if(!Class)return null;audioContext=new Class();}
+    if(audioContext.state==='suspended') void audioContext.resume().catch(()=>{});
+    return audioContext;
+  } catch(err){console.warn('提示音不可用',err);return null;}
+}
+function playCue(s,kind,onDone){
+  const ctx=ensureAudioContext();
+  const notes=kind==='intro'?[523.25,659.25,783.99,1046.50]:[783.99,659.25,587.33,523.25];
+  const volume=Math.max(0, Math.min(.8, db.settings.jingleVolume ?? .38));
+  if(ctx && volume>0){
+    const t0=ctx.currentTime+.035;
+    s.cueNodes=[];
+    for(let i=0;i<notes.length;i++){
+      const start=t0+i*.275;
+      const osc=ctx.createOscillator();const amp=ctx.createGain();
+      osc.type='sine';osc.frequency.setValueAtTime(notes[i],start);
+      amp.gain.setValueAtTime(.0001,start);
+      amp.gain.exponentialRampToValueAtTime(Math.max(.001,volume*.22),start+.027);
+      amp.gain.exponentialRampToValueAtTime(.0001,start+.245);
+      osc.connect(amp);amp.connect(ctx.destination);osc.start(start);osc.stop(start+.252);
+      s.cueNodes.push(osc);
+    }
+  }
+  // Use a session timer so pause, next, and stop cancel the cue consistently.
+  s.timer=setTimeout(()=>{s.cueNodes=[];onDone();},1300);
+}
 function speakOnce(text,lang,onDone,onFailure) {
   const utterance = new SpeechSynthesisUtterance(text);
   utterance.lang=lang;
   utterance.rate=lang==='en-US'?db.settings.rateEn:db.settings.rateZh;
-  utterance.pitch=1;
+  utterance.pitch=lang==='en-US'?db.settings.pitchEn:db.settings.pitchZh;
+  utterance.volume=db.settings.voiceVolume;
   const v=chooseVoice(lang);if(v)utterance.voice=v;
   utterance.onend=onDone;
   utterance.onerror=onFailure;
@@ -590,6 +650,15 @@ function executeStep(){
   if(step.type==='wait'){
     updatePlayer();
     s.timer=setTimeout(()=>{if(session!==s||s.paused)return;s.stepIndex++;executeStep();},step.duration);
+    return;
+  }
+  if(step.type==='jingle'){
+    const token=++s.playToken;
+    updatePlayer();
+    playCue(s,step.kind,()=>{
+      if(session!==s||s.paused||s.playToken!==token)return;
+      cancelTimers(s);s.stepIndex++;executeStep();
+    });
     return;
   }
   const token=++s.playToken;
@@ -770,21 +839,6 @@ async function prepareImage(file,rect){
     return new Promise((resolve,reject)=>c.toBlob(blob=>blob?resolve(blob):reject(new Error('无法导出裁剪图片')),'image/jpeg',.88));
   }finally{URL.revokeObjectURL(url);}
 }
-async function recognizeHandwriting(blob,lang){
-  const endpoint=db.settings.ocrEndpoint?.trim();
-  if(!validateOcrEndpoint(endpoint))throw new Error('手写识别未配置：请先在“设置”填写安全 Worker 接口地址。');
-  if(!ocrPin)throw new Error('请先到“设置”输入云端 OCR 的访问口令，再使用手写识别。');
-  if(blob.size>4*1024*1024)throw new Error('选区图片仍过大，请缩小选区后重试。');
-  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),35000);
-  try{
-    const resp=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'image/jpeg','X-OCR-PIN':ocrPin,'X-OCR-Lang':lang==='en-US'?'en':'zh'},body:blob,signal:controller.signal,cache:'no-store'});
-    const data=await resp.json().catch(()=>({error:'服务返回的内容不是 JSON'}));
-    if(!resp.ok)throw new Error(data.error||`服务返回 HTTP ${resp.status}`);
-    const lines=extractOcrLines(data);
-    if(!lines.length)throw new Error('手写服务没有识别出文字，请重新拍摄或改用手动输入。');
-    return lines.join('\n');
-  }finally{clearTimeout(timer);}
-}
 async function recognizePrint(blob,lang,onStatus){
   await ensureOcr();
   const worker=await Tesseract.createWorker(lang==='en-US'?'eng':'chi_sim',1,{
@@ -803,14 +857,32 @@ async function runOcr(){
     updateStatus('已确认的选区正在识别…');
     const blob=confirmedCropBlob;
     const lang=$('#importLang').value;
-    updateStatus(ocrKind==='handwriting'?'专用手写识别中（需要网络）…':'正在启动本机印刷体识别…');
-    const text=ocrKind==='handwriting'?await recognizeHandwriting(blob,lang):await recognizePrint(blob,lang,updateStatus);
-    if(!text){updateStatus('没有识别出词语，请缩小识别区域或手动输入。');return;}
+    updateStatus('正在启动本机印刷体识别（首次加载需要联网）…');
+    const text=await recognizePrint(blob,lang,updateStatus);
+    if(!text){updateStatus('没有识别出印刷词语。手写照片可以使用 iPhone 实况文本或上方手动输入。');return;}
     const textarea=$('#importText');textarea.value=[textarea.value.trim(),text].filter(Boolean).join('\n');
     updateStatus('识别完成，已将选区文字添加到下方。请仔细核对并切分词语。');
     refreshImportPreview();textarea.scrollIntoView({behavior:'smooth',block:'nearest'});
-  }catch(err){console.error(err);updateStatus(`识别未完成：${err.name==='AbortError'?'网络超时':(err.message||'未知错误')}。不会自动改用低准确率引擎。`);}
+  }catch(err){console.error(err);updateStatus(`本机识别未完成：${err.message||'未知错误'}。可改用手动输入或 iPhone 实况文本。`);}
   finally{ocrBusy=false;updateCropActionBar();}
+}
+async function pasteLiveText(){
+  const target=$('#importText');
+  if(!target)return;
+  let copy='';
+  try{if(navigator.clipboard?.readText)copy=(await navigator.clipboard.readText()).trim();}catch{}
+  if(!copy){
+    target.focus();
+    const status=$('#ocrStatus');
+    if(status)status.textContent='无法自动读取剪贴板。请长按下面的输入框，选择「粘贴」。';
+    toast('请在下方输入框长按，然后选择粘贴。');
+    return;
+  }
+  target.value=[target.value.trim(),copy].filter(Boolean).join('\n');
+  refreshImportPreview();
+  const status=$('#ocrStatus');if(status)status.textContent='已粘贴照片文本。请检查识别错误、删除重复项，再核对词语。';
+  target.scrollIntoView({behavior:'smooth',block:'nearest'});
+  toast('已粘贴剪贴板中的文字，请检查后保存。');
 }
 function downloadBackup(){
   const blob=new Blob([JSON.stringify({version:1,exportedAt:new Date().toISOString(),...db},null,2)],{type:'application/json'});
@@ -844,6 +916,7 @@ function handleAction(button) {
     case 'close-modal':closeModal();break;
     case 'save-import':saveImport();break;
     case 'run-ocr':void runOcr();break;
+    case 'paste-live-text':void pasteLiveText();break;
     case 'confirm-crop':void confirmCrop();break;
     case 'edit-crop':editCrop();break;
     case 'check-update':void checkForUpdate();break;
@@ -893,6 +966,21 @@ function handleAction(button) {
     case 'play-group':source={type:'group',id:groupId};setTab('practice');break;
     case 'play-selected':source={type:'selected'};setTab('practice');break;
     case 'set-word-gap': db.settings.wordGap=Number(button.dataset.seconds); save(); render(); break;
+    case 'go-practice':setTab('practice');break;
+    case 'voice-preset':{
+      const clear=button.dataset.preset==='clear';
+      db.settings.rateZh=clear?.80:1.00;
+      db.settings.rateEn=clear?.75:1.00;
+      db.settings.pitchZh=1;db.settings.pitchEn=1;
+      save();render();toast(clear?'已使用清晰慢速预设。':'已使用自然速度预设。');break;
+    }
+    case 'refresh-voices':{
+      if('speechSynthesis' in window){speechSynthesis.getVoices();render();toast('已刷新可用音色；只有本机提供的声音会显示。');}break;
+    }
+    case 'test-cue':{
+      const temp={timer:0,cueNodes:[]};ensureAudioContext();playCue(temp,'intro',()=>{});
+      toast('正在试听开场提示音乐。');break;
+    }
     case 'start-play':beginPlayback();break;
     case 'stop-play':stopPlayback();break;
     case 'toggle-pause':if(session?.paused)resumePlayback();else pausePlayback();break;
@@ -920,7 +1008,7 @@ document.addEventListener('click',event=>{
   const action=event.target.closest('[data-action]');if(action){handleAction(action);return;}
 });
 $('#quickHelp').addEventListener('click',()=>modal('使用方法',`<ol class="help-list">
-  <li><strong>添加词语：</strong>已有词库卡片内直接选“手动输入添加”或“拍照识别添加”，新词会追加、不覆盖；中文空格自动拆分，英语按行保留短语。</li>
+  <li><strong>添加词语：</strong>点击页面右上角「手动录入」即可直接输入，完全不依赖弹窗；已有词库也能通过卡片内按钮追加。中文空格自动拆分，英语按行保留短语。</li>
   <li><strong>标拼音：</strong>打开中文词库，点击某个词语的“编辑”，再点亮需要写拼音的汉字。</li>
   <li><strong>做组合：</strong>跨词库勾选多个词语，保存成组合或直接开始听写。</li>
   <li><strong>设置播报：</strong>选顺序/随机、每词报1—5遍、重复间隔、词间等待，再开始播报。</li>
@@ -936,8 +1024,6 @@ document.addEventListener('change',event=>{
     updatePhotoPreview(target.files?.[0]);return;
   }
   if(target.id==='importLang'||target.id==='importSplit'){refreshImportPreview();return;}
-  if(target.name==='ocrKind'){ocrKind=target.value;return;}
-  if(target.id==='ocrPin'){ocrPin=target.value;return;}
   if(target.dataset.reviewText){updateReviewText(target.dataset.reviewText,target.value);refreshReviewChars(target.dataset.reviewText);return;}
   if(target.id==='practiceSource'){
     const val=target.value;
@@ -947,35 +1033,30 @@ document.addEventListener('change',event=>{
   if(target.id==='backupFile'){importBackup(target.files?.[0]);target.value='';return;}
   const setting=target.name;
   if(Object.prototype.hasOwnProperty.call(DEFAULT_SETTINGS,setting)){
-    if(setting==='skipDuplicates'||setting==='hideAnswers')db.settings[setting]=target.checked;
+    if(['skipDuplicates','hideAnswers','introCue','outroCue'].includes(setting))db.settings[setting]=target.checked;
     else if(setting==='repetitions')db.settings.repetitions=Number(target.value);
-    else if(['rateEn','rateZh','wordGap','repeatGap'].includes(setting))db.settings[setting]=Number(target.value);
-    else if(setting==='ocrEndpoint'){
-      const val=target.value.trim();
-      if(val && !validateOcrEndpoint(val)){toast('识别地址必须为有效的 HTTPS 地址，且建议以 /ocr 结尾。');return;}
-      db.settings.ocrEndpoint=val;
-    } else db.settings[setting]=target.value;
+    else if(['rateEn','rateZh','pitchEn','pitchZh','voiceVolume','jingleVolume','wordGap','repeatGap'].includes(setting))db.settings[setting]=Number(target.value);
+    else db.settings[setting]=target.value;
     save();render();
   }
 });
 document.addEventListener('input',event=>{
   const target=event.target;
   if(target.id==='importText'){refreshImportPreview();return;}
-  if(target.id==='ocrPin'){ocrPin=target.value;return;}
   if(target.dataset.reviewText){updateReviewText(target.dataset.reviewText,target.value);return;}
   if(target.id==='editorText'){
     editingMarks.clear();drawCharGrid();return;
   }
-  if(['rateZh','rateEn','wordGap','repeatGap'].includes(target.name)){
+  if(['rateZh','rateEn','pitchZh','pitchEn','voiceVolume','jingleVolume','wordGap','repeatGap'].includes(target.name)){
     const label=$(`#${target.name}Value`);
-    if(label)label.textContent=['rateZh','rateEn'].includes(target.name)?Number(target.value).toFixed(2)+' ×':target.value+' 秒';
+    if(label)label.textContent=['rateZh','rateEn'].includes(target.name)?Number(target.value).toFixed(2)+' ×':['pitchZh','pitchEn'].includes(target.name)?Number(target.value).toFixed(2):['voiceVolume','jingleVolume'].includes(target.name)?Math.round(Number(target.value)*100)+'%':target.value+' 秒';
   }
 });
 window.addEventListener('keydown',event=>{
   if(event.key==='Escape'&&!$('#overlay').hidden&&!ocrBusy)closeModal();
 });
 if('speechSynthesis' in window){
-  speechSynthesis.addEventListener?.('voiceschanged',()=>{if(tab==='settings'&&$('#overlay').hidden)render();});
+  speechSynthesis.addEventListener?.('voiceschanged',()=>{if((tab==='settings'||(tab==='practice'&&!session))&&$('#overlay').hidden)render();});
 }
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).catch(error=>console.warn('Service Worker 注册失败',error));

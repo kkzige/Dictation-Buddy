@@ -11,14 +11,15 @@
   <link rel="apple-touch-icon" href="./assets/icon-192.png">
   <link rel="icon" type="image/svg+xml" href="./assets/icon.svg">
   <link rel="manifest" href="./manifest.webmanifest">
-  <link rel="stylesheet" href="./styles.css">
+  <link rel="stylesheet" href="./styles.css?v=0.3.5">
   <title>听写小助手</title>
 </head>
 <body>
   <div class="app-frame">
     <header class="topbar">
       <div class="brand-icon" aria-hidden="true">听</div>
-      <div class="brand-title"><span>听写小助手</span><small>Dictation Buddy · v0.3.2</small></div>
+      <div class="brand-title"><span>听写小助手</span><small>Dictation Buddy · v0.3.5</small></div>
+      <a class="top-manual-link" href="./manual.html" aria-label="独立手动录入页面">⌨ 手动录入</a>
       <button class="icon-button" type="button" id="quickHelp" aria-label="使用帮助" title="使用帮助">?</button>
     </header>
     <main id="mainContent" aria-live="off"></main>
@@ -39,6 +40,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="./app.js"></script>
+  <script type="module" src="./app.js?v=0.3.5"></script>
 </body>
 </html>
