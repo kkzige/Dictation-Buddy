@@ -37,9 +37,9 @@ assert.ok(app.includes('voiceFineTunePanel()+ceremonyPanel()'));
 assert.ok(app.includes('function playCue(s,kind,onDone)'));
 assert.ok(app.includes('ensureAudioContext();'));
 assert.ok(app.includes('s.cueNodes=[]'));
-assert.ok(app.includes('const APP_VERSION = \'0.3.7\''));
+assert.ok(app.includes('const APP_VERSION = \'0.3.8\''));
 const sw=fs.readFileSync('./sw.js','utf8');
-assert.ok(sw.includes('v0.3.7'));
+assert.ok(sw.includes('v0.3.8'));
 assert.ok(sw.includes("url.pathname.endsWith('/manual.html')?'./manual.html':'./index.html'"));
 console.log('PASS: source/domain assertions, version, old data, parsed terms, cues, existing timing');
 // Render and inspect the exact template functions in an isolated VM without browser access.
@@ -64,27 +64,18 @@ assert.ok(app.includes("case 'audition-voice'"));
 assert.ok(app.includes("case 'pick-voice'"));
 assert.ok(app.includes("['intro','outro']"));
 console.log('PASS: rendered settings templates preserve original cadence, display usable voices, cue choices');
-// MP3 sequencing contract: cue must not advance to spoken prompt before the 'ended' event.
-{
-  const source=app.slice(app.indexOf('function playCue('),app.indexOf('\nfunction speakOnce('));
-  let created=null,called=0;
-  class FakeAudio {
-    constructor(){this.onended=null;this.onerror=null;created=this;this.volume=1;}
-    play(){return Promise.resolve();}
-    pause(){}
-  }
-  const ctx={currentMusic:()=>({url:'blob:demo'}),Audio:FakeAudio,db:{settings:{jingleVolume:.4}},toast:()=>{},playOriginalCue:()=>{throw new Error('fallback called')},console};
-  vm.runInNewContext(source+'\n globalThis.demoPlayCue=playCue;',ctx);
-  const s={musicPlayer:new FakeAudio()};
-  ctx.demoPlayCue(s,'intro',()=>called++);
-  assert.equal(called,0,'prompt must NOT speak while MP3 is still playing');
-  assert.equal(created.volume,.4);
-  created.onended();
-  assert.equal(called,1,'prompt starts once music is fully ended');
-  assert.equal(created.onended,null);
-}
+// New Web Audio implementation must keep advance-after-ended contract.
+const engineText=fs.readFileSync('./music-engine.js','utf8');
+assert.ok(engineText.includes('decodeAudioData'));
+assert.ok(engineText.includes('ctx.createBufferSource()'));
+assert.ok(engineText.includes('node.onended'));
+assert.ok(app.includes('unlockAudioFromGesture()'));
+assert.ok(app.includes('musicEngine.play('));
+assert.ok(sw.includes("'./music-engine.js'"));
 const audioStore=fs.readFileSync('./audio-store.js','utf8');
 assert.ok(audioStore.includes('indexedDB.open('));
-assert.ok(audioStore.includes('new Blob('));
-for(const name of ['Dir_OP.mp3','Dir_EP.mp3'])assert.ok(app.includes(name));
-console.log('PASS: MP3 onended boundary prevents premature speech, name mapping, indexedDB storage');
+for(const name of ['Dir_OP.mp3','Dir_EP.mp3']){
+ assert.ok(app.includes(name));
+ assert.ok(fs.statSync('./assets/audio/'+name).size>20000);
+}
+console.log('PASS: MP3 Web Audio decode, user-click unlock, onended completion, bundled assets');

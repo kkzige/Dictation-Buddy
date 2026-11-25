@@ -6,9 +6,10 @@ import {
 import {clampCrop} from './ocr-utils.js';
 import {isNewerVersion} from './version-utils.js';
 import {saveMusic, loadMusic, removeMusic} from './audio-store.js';
+import {createMusicEngine} from './music-engine.js';
 
 const STORAGE_KEY = 'dictation-buddy-v0.1-data'; // Keep unchanged across program updates
-const APP_VERSION = '0.3.7';
+const APP_VERSION = '0.3.8';
 const OCR_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js'; // OCR only, fetched on demand
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -43,11 +44,18 @@ let ocrBusy = false;
 let ocrLoading = null;
 let toastTimer = 0;
 let audioContext = null;
+const musicEngine=createMusicEngine(()=>ensureAudioContext(false));
+let musicPreviewHandle=null;
+function unlockAudioFromGesture(){
+  // Run directly in the Start/Preview/Resume tap before any asynchronous work.
+  const ctx=ensureAudioContext(true);
+  if(!ctx)toast('此浏览器不支持提示音乐，请使用 Safari。');
+  return ctx;
+}
 // Optional music is a local IndexedDB file or a deployed assets/audio/Dir_OP.mp3, Dir_EP.mp3.
 // Music is NOT included in the word-bank JSON backup, and never uploaded to a server.
 const customMusic = {intro:null, outro:null};
 const bundledMusic = {intro:null,outro:null};
-let musicPreview = null;
 let storedAudioLoaded = false;
 function revokeMusic(kind){
   const old=customMusic[kind];
@@ -57,14 +65,18 @@ function revokeMusic(kind){
 function currentMusic(kind){return customMusic[kind]||bundledMusic[kind]||null;}
 function musicLabel(kind){
   const file=currentMusic(kind);
-  if(file) return `${file.name} · ${file.source==='local'?'已保存本机':'随项目发布'}`;
+  if(file) return `${file.name} · ${file.source==='local'?'已保存本机':'随项目发布'} · ${file.status==='ready'?'已解码可播放（'+file.duration.toFixed(1)+'秒）':file.status==='error'?'解码失败：'+file.error:'正在载入音频'}`;
   return '未设置 MP3，将使用原有短提示音';
 }
 async function loadUserMusic(){
   for(const kind of ['intro','outro']){
     try{
       const record=await loadMusic(kind);
-      if(record?.blob){revokeMusic(kind);customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob)};}
+      if(record?.blob){
+        revokeMusic(kind);
+        customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob),blob:record.blob};
+        void musicEngine.prepare(customMusic[kind]).catch(err=>console.warn('本机音乐解码失败',kind,err)).finally(()=>{if(tab==='practice'&&!session)render();});
+      }
     }catch(err){console.warn('本机 MP3 读取失败',kind,err);}
   }
   storedAudioLoaded=true;
@@ -73,12 +85,10 @@ async function loadUserMusic(){
 async function checkBundledMusic(){
   for(const [kind,filename] of [['intro','Dir_OP.mp3'],['outro','Dir_EP.mp3']]){
     const url=new URL(`./assets/audio/${filename}`,import.meta.url).href;
-    try {
-      const response=await fetch(url,{method:'HEAD',cache:'no-store'});
-      if(response.ok && !String(response.headers.get('content-type')||'').includes('text/html')){
-        bundledMusic[kind]={name:filename,source:'bundled',url};
-      }
-    }catch(err){/* Optional audio may not be published yet; original cue remains available. */}
+    const clip={name:filename,source:'bundled',url,status:'loading'};
+    bundledMusic[kind]=clip;
+    // GET+decode checks real MP3 data; HEAD only could succeed even when an audio file is invalid.
+    void musicEngine.prepare(clip).catch(err=>console.warn('内置 MP3 读取或解码失败',kind,err)).finally(()=>{if(tab==='practice'&&!session)render();});
   }
   if(tab==='practice'&&!session)render();
 }
@@ -88,13 +98,14 @@ async function acceptMusicFile(kind,file){
     if(!/\.mp3$/i.test(file.name)||!file.size||file.size>15*1024*1024)throw new Error('请选用不超过 15MB 的 MP3 文件。');
     const record=await saveMusic(kind,file);
     revokeMusic(kind);
-    customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob)};
+    customMusic[kind]={name:record.name,source:'local',url:URL.createObjectURL(record.blob),blob:record.blob};
+    void musicEngine.prepare(customMusic[kind]).catch(err=>console.warn('新增 MP3 解码失败',err)).finally(()=>{if(tab==='practice'&&!session)render();});
     toast(`已保存${kind==='intro'?'开始':'结束'}音乐：${record.name}`);
   }catch(err){toast(`无法保存音乐：${err.message}。本机文件存储失败时，请尝试用电脑把 Dir_OP.mp3 和 Dir_EP.mp3 放入 assets/audio。`);}
   if(tab==='practice'&&!session)render();
 }
 async function clearMusicFile(kind){
-  if(musicPreview){musicPreview.pause();musicPreview=null;}
+  if(musicPreviewHandle){musicPreviewHandle.stop();musicPreviewHandle=null;}
   try{await removeMusic(kind);revokeMusic(kind);toast('已移除本机音乐，改用随项目发布的 MP3 或原有提示音。');}
   catch(err){toast('移除音乐失败：'+err.message);}
   if(tab==='practice'&&!session)render();
@@ -247,7 +258,7 @@ function voiceFineTunePanel() {
     <p class="subtext">先试听再选音色；中文和英文分别调整，修改后自动保存。优先推荐较慢、自然的读音。</p>
     <div class="action-row tune-presets"><button type="button" class="btn btn-subtle" data-action="voice-preset" data-preset="clear">清晰慢速（推荐）</button><button type="button" class="btn" data-action="voice-preset" data-preset="natural">自然速度</button></div>
     <label class="field"><span>中文音色（${availableVoiceCount('zh-CN')} 种可选）</span><select name="zhVoice">${voiceOptions('zh-CN',a.zhVoice)}</select></label>
-    <p class="setting-help">以下列出 Safari 实际提供的中文声音（含普通话、台湾国语、粤语），不是云端音色库。建议优先选普通话 zh-CN。选择某声线后可直接试听并保存。</p>
+    <p class="setting-help">这些是 iPhone Safari 实际开放的中文声音，重复名称可能代表重复声线。网页不能凭空增加 iOS 没有提供的音色；建议先试听普通话 zh-CN，台湾国语、粤语仅作备选。</p>
     <details class="voice-gallery-details" open><summary>展开中文音色逐个试听（${availableVoiceCount('zh-CN')} 种）</summary>
       <div class="voice-gallery">${voiceGallery()}</div>
     </details>
@@ -280,7 +291,7 @@ function ceremonyPanel() {
       ${customMusic.outro?'<button type="button" class="btn btn-small btn-subtle" data-action="clear-music" data-kind="outro">移除本机音乐</button>':''}</div>
     <div class="range-title"><span>提示音乐音量</span><strong id="jingleVolumeValue">${Math.round(a.jingleVolume*100)}%</strong></div>
     <input aria-label="提示音乐音量" type="range" name="jingleVolume" min="0" max=".8" step=".05" value="${a.jingleVolume}">
-    <p class="setting-help">手机选入的 MP3 会尝试保存在当前设备中，换手机需重新选择。也可由电脑把真实 Dir_OP.mp3、Dir_EP.mp3 上传到 GitHub 仓库的 assets/audio/ 目录，让所有设备自动使用。当前版本没有内置你尚未上传的那两个文件。</p>
+    <p class="setting-help">本版已内置你提供的 Dir_OP.mp3 / Dir_EP.mp3，可直接试听、播放。若之前在本机选过无法播放的文件，请点“移除本机音乐”恢复使用内置文件；以后也可以自行更换 MP3。首次进入时音乐会预加载。</p>
   </section>`;
 }
 
@@ -671,18 +682,15 @@ function beginPlayback() {
   const words=arrangeWords(collectWords(db,sourceToUse,allSelectedRefs()),db.settings);
   if(!words.length){toast('当前来源没有词语，请先添加或勾选。');return;}
   stopPlayback(false);
-  session={words,steps:buildSessionSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse),musicPlayer:new Audio()};
+  unlockAudioFromGesture();
+  session={words,steps:buildSessionSteps(words,db.settings),stepIndex:0,paused:false,finished:false,revealed:!db.settings.hideAnswers,playToken:0,timer:0,watchdog:0,sourceName:sourceLabel(sourceToUse),musicHandle:null,cueNodes:[]};
   // Start audio context from the actual tap; on iPhone user interaction is required.
-  if(db.settings.introCue || db.settings.outroCue) ensureAudioContext();
   render();
   executeStep(); // Called directly from a tap.
 }
 function cancelCue(s){
   if(!s) return;
-  if(s.musicPlayer){
-    s.musicPlayer.onended=null;s.musicPlayer.onerror=null;
-    try{s.musicPlayer.pause();s.musicPlayer.currentTime=0;}catch{}
-  }
+  if(s.musicHandle){s.musicHandle.stop();s.musicHandle=null;}
   for(const node of s.cueNodes||[])try{node.stop()}catch{}
   s.cueNodes=[];
 }
@@ -701,12 +709,19 @@ function chooseVoice(lang){
   return matching.find(v=>v.localService && v.lang.toLowerCase()===lang.toLowerCase()) || matching.find(v=>v.localService) || matching[0] || null;
 }
 // Short, original, instrumental cue: generated locally, no copyrighted audio or network file.
-function ensureAudioContext(){
-  try {
-    if(!audioContext){const Class=window.AudioContext||window.webkitAudioContext;if(!Class)return null;audioContext=new Class();}
-    if(audioContext.state==='suspended') void audioContext.resume().catch(()=>{});
+function ensureAudioContext(shouldUnlock=false){
+  try{
+    if(!audioContext){
+      const Class=window.AudioContext||window.webkitAudioContext;
+      if(!Class)return null;
+      audioContext=new Class();
+    }
+    if(shouldUnlock && audioContext.state==='suspended'){
+      // Call resume synchronously in the user tap; do not await before invoking.
+      void audioContext.resume().catch(err=>console.warn('iPhone 音频解锁失败',err));
+    }
     return audioContext;
-  } catch(err){console.warn('提示音不可用',err);return null;}
+  }catch(err){console.warn('提示音不可用',err);return null;}
 }
 function playOriginalCue(s,kind,onDone){
   const ctx=ensureAudioContext();
@@ -730,32 +745,27 @@ function playOriginalCue(s,kind,onDone){
 /** Play MP3 fully, then advance to speech; no hardcoded audio length. */
 function playCue(s,kind,onDone){
   const clip=currentMusic(kind);
-  if(!clip?.url){playOriginalCue(s,kind,onDone);return;}
-  const player=s.musicPlayer || (s.musicPlayer=new Audio());
-  player.onended=null;player.onerror=null;
-  player.src=clip.url;
-  player.preload='auto';
-  // Some iOS models ignore per-element volume; device volume remains the fallback.
-  player.volume=Math.min(1,Math.max(0,db.settings.jingleVolume??.38));
-  let finished=false;
-  const finish=()=>{
-    if(finished)return;finished=true;
-    player.onended=null;player.onerror=null;
-    onDone();
+  if(!clip){playOriginalCue(s,kind,onDone);return;}
+  // The AudioContext was unlocked when the user tapped Start (or Preview).
+  // The decoded AudioBuffer can start later, including for the ending cue.
+  let triedBundled=false;
+  const failed=(error)=>{
+    console.warn('MP3 播放失败',kind,error);
+    if(!triedBundled && clip.source==='local' && bundledMusic[kind] && bundledMusic[kind]!==clip){
+      triedBundled=true;
+      toast('本机音乐无法播放，尝试使用随程序内置的 MP3。');
+      s.musicHandle=musicEngine.play(bundledMusic[kind],db.settings.jingleVolume,onDone,failFinal);
+      return;
+    }
+    failFinal(error);
   };
-  const fallback=()=>{
-    if(finished)return;finished=true;
-    player.onended=null;player.onerror=null;
-    try{player.pause();}catch{}
-    toast(`${kind==='intro'?'开始':'结束'} MP3 播放失败，已改用短提示音。`);
+  const failFinal=(error)=>{
+    console.warn('音乐播放失败，改用提示音',error);
+    toast(`${kind==='intro'?'开始':'结束'} MP3 失败（${String(error?.message||'未知原因').slice(0,55)}），改用短提示音继续。`);
+    // No stuck "准备开始": always advance after the short original cue.
     playOriginalCue(s,kind,onDone);
   };
-  player.onended=finish;
-  player.onerror=fallback;
-  try{
-    const result=player.play();
-    if(result?.catch)void result.catch(fallback);
-  }catch(err){fallback();}
+  s.musicHandle=musicEngine.play(clip,db.settings.jingleVolume,onDone,failed);
 }
 
 function speakOnce(text,lang,onDone,onFailure,voiceOverride=null) {
@@ -818,6 +828,7 @@ function pausePlayback(){
 }
 function resumePlayback(){
   if(!session||session.finished)return;
+  unlockAudioFromGesture();
   session.paused=false;executeStep();
 }
 function jumpWord(delta,absolute=false){
@@ -1121,16 +1132,18 @@ function handleAction(button) {
     }
     case 'test-music':{
       const kind=button.dataset.kind==='outro'?'outro':'intro';
-      if(musicPreview){musicPreview.pause();musicPreview=null;}
+      if(musicPreviewHandle){musicPreviewHandle.stop();musicPreviewHandle=null;}
+      unlockAudioFromGesture();
       const clip=currentMusic(kind);
-      if(clip?.url){
-        const player=new Audio(clip.url);musicPreview=player;
-        player.volume=Math.min(1,Math.max(0,db.settings.jingleVolume??.38));
-        player.onended=()=>{if(musicPreview===player)musicPreview=null;};
-        player.onerror=()=>toast('MP3 试听失败，请重新选择文件。');
-        void player.play().catch(()=>toast('试听被浏览器阻止，请再次点按试听。'));
+      if(clip){
+        let handle;
+        const finish=()=>{if(musicPreviewHandle===handle)musicPreviewHandle=null;toast('音乐试听已完成。');};
+        const fail=err=>{if(musicPreviewHandle===handle)musicPreviewHandle=null;toast('MP3 试听失败：'+(err.message||'请检查音频设置'));};
+        handle=musicEngine.play(clip,db.settings.jingleVolume,finish,fail);
+        musicPreviewHandle=handle;
+        toast('正在准备音乐，加载完成后会播放…');
       }else{
-        const temp={timer:0,cueNodes:[],musicPlayer:new Audio()};ensureAudioContext();playOriginalCue(temp,kind,()=>{});
+        const temp={timer:0,cueNodes:[]};playOriginalCue(temp,kind,()=>{});
       }
       break;
     }
@@ -1138,7 +1151,7 @@ function handleAction(button) {
       void clearMusicFile(button.dataset.kind==='outro'?'outro':'intro');break;
     }
     case 'test-cue':{
-      const temp={timer:0,cueNodes:[],musicPlayer:new Audio()};ensureAudioContext();playCue(temp,'intro',()=>{});
+      const temp={timer:0,cueNodes:[]};unlockAudioFromGesture();playCue(temp,'intro',()=>{});
       break;
     }
     case 'start-play':beginPlayback();break;
